@@ -18,3 +18,9 @@ class StorageDevice:
     media_type: str | None = None
     can_pool: bool | None = None
     health_status: str | None = None
+    usb_device_id: str | None = None
+    storage_unique_id: str | None = None
+    storage_unique_id_format: str | None = None
+    container_id: str | None = None
+    location_paths: tuple[str, ...] = ()
+    slot: int | None = None

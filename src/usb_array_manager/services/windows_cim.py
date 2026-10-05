@@ -81,6 +81,8 @@ $devices = @(
         ForEach-Object {
             $disk = $_
             $usbDeviceId = $null
+            $containerId = $null
+            $locationPaths = @()
             $physicalDisk = Find-PhysicalDisk $disk $physicalDisks
 
             if ($canReadPnpProperties) {
@@ -90,6 +92,26 @@ $devices = @(
                         -KeyName 'DEVPKEY_Device_Parent' `
                         -ErrorAction Stop
                     $usbDeviceId = $parentProperty.Data
+
+                    $identityProperties = @(
+                        Get-PnpDeviceProperty `
+                            -InstanceId $usbDeviceId `
+                            -KeyName @(
+                                'DEVPKEY_Device_ContainerId',
+                                'DEVPKEY_Device_LocationPaths'
+                            ) `
+                            -ErrorAction Stop
+                    )
+                    $containerId = (
+                        $identityProperties |
+                            Where-Object KeyName -eq 'DEVPKEY_Device_ContainerId' |
+                            Select-Object -First 1 -ExpandProperty Data
+                    )
+                    $locationPaths = @(
+                        $identityProperties |
+                            Where-Object KeyName -eq 'DEVPKEY_Device_LocationPaths' |
+                            Select-Object -First 1 -ExpandProperty Data
+                    )
                 }
                 catch {
                     # Some USB bridges do not expose a readable parent property.
@@ -122,6 +144,10 @@ $devices = @(
                 media_type     = if ($physicalDisk) { $physicalDisk.MediaType } else { $disk.MediaType }
                 can_pool       = if ($physicalDisk) { $physicalDisk.CanPool } else { $null }
                 health_status  = if ($physicalDisk) { $physicalDisk.HealthStatus } else { $disk.Status }
+                storage_unique_id = if ($physicalDisk) { $physicalDisk.UniqueId } else { $null }
+                storage_unique_id_format = if ($physicalDisk) { $physicalDisk.UniqueIdFormat } else { $null }
+                container_id   = $containerId
+                location_paths = $locationPaths
             }
         }
 )
@@ -249,6 +275,12 @@ def _record_to_device(record: Mapping[str, Any]) -> StorageDevice:
     if not isinstance(raw_letters, list):
         raw_letters = []
 
+    raw_location_paths = record.get("location_paths")
+    if isinstance(raw_location_paths, str):
+        raw_location_paths = [raw_location_paths]
+    if not isinstance(raw_location_paths, list):
+        raw_location_paths = []
+
     capacity = record.get("capacity_bytes")
     try:
         capacity_bytes = int(capacity) if capacity is not None else None
@@ -273,6 +305,17 @@ def _record_to_device(record: Mapping[str, Any]) -> StorageDevice:
         media_type=_enum_text(record.get("media_type"), _MEDIA_TYPES),
         can_pool=_optional_bool(record.get("can_pool")),
         health_status=_enum_text(record.get("health_status"), _HEALTH_STATUSES),
+        usb_device_id=usb_device_id,
+        storage_unique_id=_clean_text(record.get("storage_unique_id")),
+        storage_unique_id_format=_clean_text(
+            record.get("storage_unique_id_format")
+        ),
+        container_id=_clean_text(record.get("container_id")),
+        location_paths=tuple(
+            location
+            for value in raw_location_paths
+            if (location := _clean_text(value)) is not None
+        ),
     )
 
 

@@ -13,11 +13,15 @@ class RecordConversionTests(unittest.TestCase):
                 "drive_letters": ["J:", "I:"],
                 "device_path": r"\\.\PHYSICALDRIVE4",
                 "pnp_device_id": r"USB\VID_1234&PID_ABCD\ABC123",
-                "usb_device_id": None,
+                "usb_device_id": r"USB\VID_1234&PID_ABCD\ABC123",
                 "bus_type": 7,
                 "media_type": 4,
                 "can_pool": False,
                 "health_status": 0,
+                "storage_unique_id": "unique-123",
+                "storage_unique_id_format": 3,
+                "container_id": "{CONTAINER-123}",
+                "location_paths": ["PCIROOT(0)#USB(1)"],
             }
         )
 
@@ -32,6 +36,10 @@ class RecordConversionTests(unittest.TestCase):
         self.assertEqual(device.media_type, "SSD")
         self.assertFalse(device.can_pool)
         self.assertEqual(device.health_status, "Healthy")
+        self.assertEqual(device.storage_unique_id, "unique-123")
+        self.assertEqual(device.storage_unique_id_format, "3")
+        self.assertEqual(device.container_id, "{CONTAINER-123}")
+        self.assertEqual(device.location_paths, ("PCIROOT(0)#USB(1)",))
 
     def test_missing_optional_values_are_allowed(self) -> None:
         device = _record_to_device(

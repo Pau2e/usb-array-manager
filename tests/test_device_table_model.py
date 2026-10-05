@@ -1,7 +1,9 @@
 import unittest
+from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt
 
+from usb_array_manager.models.benchmark_result import BenchmarkResult
 from usb_array_manager.models.storage_device import StorageDevice
 from usb_array_manager.ui.device_table_model import DeviceTableModel
 
@@ -25,31 +27,65 @@ class DeviceTableModelTests(unittest.TestCase):
                     media_type="SSD",
                     can_pool=False,
                     health_status="Healthy",
+                    slot=2,
                 )
             ]
         )
 
         self.assertEqual(model.rowCount(), 1)
-        self.assertEqual(model.columnCount(), 12)
+        self.assertEqual(model.columnCount(), 18)
         self.assertEqual(
             model.data(model.index(0, 0), Qt.ItemDataRole.DisplayRole),
+            "Slot 2",
+        )
+        self.assertEqual(
+            model.data(model.index(0, 1), Qt.ItemDataRole.DisplayRole),
             "Example USB Disk",
         )
         self.assertEqual(
-            model.data(model.index(0, 3), Qt.ItemDataRole.DisplayRole),
+            model.data(model.index(0, 4), Qt.ItemDataRole.DisplayRole),
             "I:",
         )
         self.assertEqual(
-            model.data(model.index(0, 7), Qt.ItemDataRole.DisplayRole),
+            model.data(model.index(0, 8), Qt.ItemDataRole.DisplayRole),
             "USB",
         )
         self.assertEqual(
-            model.data(model.index(0, 9), Qt.ItemDataRole.DisplayRole),
+            model.data(model.index(0, 10), Qt.ItemDataRole.DisplayRole),
             "No",
         )
         self.assertEqual(
-            model.data(model.index(0, 11), Qt.ItemDataRole.DisplayRole),
+            model.data(model.index(0, 12), Qt.ItemDataRole.DisplayRole),
             "Yes",
+        )
+        self.assertEqual(
+            model.data(model.index(0, 16), Qt.ItemDataRole.DisplayRole),
+            "NOT TESTED",
+        )
+
+        model.set_benchmark_results(
+            {
+                2: BenchmarkResult(
+                    slot=2,
+                    tested_at=datetime.now(timezone.utc).isoformat(),
+                    drive_letter="I:",
+                    file_size_bytes=1024**3,
+                    sequential_read_mbps=101.25,
+                    sequential_write_mbps=42.5,
+                    burst_write_mbps=60.0,
+                    sustained_write_mbps=35.75,
+                    write_stability_cv=0.1,
+                    qualification="GOOD",
+                )
+            }
+        )
+        self.assertEqual(
+            model.data(model.index(0, 13), Qt.ItemDataRole.DisplayRole),
+            "101.2",
+        )
+        self.assertEqual(
+            model.data(model.index(0, 16), Qt.ItemDataRole.DisplayRole),
+            "GOOD",
         )
 
 
