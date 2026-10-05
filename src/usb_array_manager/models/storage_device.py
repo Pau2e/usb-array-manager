@@ -14,4 +14,7 @@ class StorageDevice:
     usb_vid: str | None
     usb_pid: str | None
     is_connected: bool
-
+    bus_type: str | None = None
+    media_type: str | None = None
+    can_pool: bool | None = None
+    health_status: str | None = None

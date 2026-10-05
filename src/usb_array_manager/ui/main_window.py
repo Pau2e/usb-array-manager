@@ -4,6 +4,7 @@ from PySide6.QtCore import QDateTime, QThread, QTimer, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from usb_array_manager.models.storage_device import StorageDevice
+from usb_array_manager.services.device_monitor import WindowsDeviceEventFilter
 from usb_array_manager.services.windows_cim import (
     DeviceDetectionError,
     detect_usb_storage_devices,
@@ -38,12 +40,15 @@ class DeviceScanThread(QThread):
 
 
 class MainWindow(QMainWindow):
-    REFRESH_INTERVAL_MS = 5_000
+    DEVICE_CHANGE_DEBOUNCE_MS = 500
+    RECONCILIATION_INTERVAL_MS = 30_000
 
     def __init__(self) -> None:
         super().__init__()
         self._scan_thread: DeviceScanThread | None = None
         self._closing = False
+        self._rescan_requested = False
+        self._native_filter_installed = False
 
         self.setWindowTitle("USB Array Manager — Read-only device inventory")
         self.resize(1_180, 430)
@@ -85,16 +90,32 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-        self._timer = QTimer(self)
-        self._timer.setInterval(self.REFRESH_INTERVAL_MS)
-        self._timer.timeout.connect(self.refresh_devices)
-        self._timer.start()
+        self._device_change_timer = QTimer(self)
+        self._device_change_timer.setSingleShot(True)
+        self._device_change_timer.setInterval(self.DEVICE_CHANGE_DEBOUNCE_MS)
+        self._device_change_timer.timeout.connect(self.refresh_devices)
+
+        self._reconciliation_timer = QTimer(self)
+        self._reconciliation_timer.setInterval(self.RECONCILIATION_INTERVAL_MS)
+        self._reconciliation_timer.timeout.connect(self.refresh_devices)
+        self._reconciliation_timer.start()
+
+        self._device_event_filter = WindowsDeviceEventFilter(
+            self._device_change_detected
+        )
+        application = QApplication.instance()
+        if application is not None:
+            application.installNativeEventFilter(self._device_event_filter)
+            self._native_filter_installed = True
+
         QTimer.singleShot(0, self.refresh_devices)
 
     def refresh_devices(self) -> None:
         if self._scan_thread is not None and self._scan_thread.isRunning():
+            self._rescan_requested = True
             return
 
+        self._rescan_requested = False
         self._status.setStyleSheet("")
         self._status.setText("Scanning Windows device inventory…")
         self._refresh_button.setEnabled(False)
@@ -117,6 +138,15 @@ class MainWindow(QMainWindow):
         self._status.setText("Device scan failed. Hover here for details.")
         self._status.setToolTip(message)
 
+    def _device_change_detected(self) -> None:
+        if self._closing:
+            return
+
+        self._rescan_requested = True
+        self._status.setStyleSheet("")
+        self._status.setText("USB hardware change detected…")
+        self._device_change_timer.start()
+
     def _scan_finished(self) -> None:
         thread = self._scan_thread
         self._scan_thread = None
@@ -125,13 +155,26 @@ class MainWindow(QMainWindow):
             thread.deleteLater()
         if self._closing:
             QTimer.singleShot(0, self.close)
+        elif self._rescan_requested:
+            QTimer.singleShot(0, self.refresh_devices)
+
+    def _remove_native_event_filter(self) -> None:
+        if not self._native_filter_installed:
+            return
+
+        application = QApplication.instance()
+        if application is not None:
+            application.removeNativeEventFilter(self._device_event_filter)
+        self._native_filter_installed = False
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._scan_thread is not None and self._scan_thread.isRunning():
             self._closing = True
-            self._timer.stop()
+            self._device_change_timer.stop()
+            self._reconciliation_timer.stop()
+            self._remove_native_event_filter()
             self._status.setText("Waiting for the current read-only scan to finish…")
             event.ignore()
             return
+        self._remove_native_event_filter()
         event.accept()
-

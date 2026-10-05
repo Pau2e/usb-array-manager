@@ -25,6 +25,12 @@ def _text(value: str | None) -> str:
     return value or "Unavailable"
 
 
+def _optional_bool(value: bool | None) -> str:
+    if value is None:
+        return "Unavailable"
+    return "Yes" if value else "No"
+
+
 @dataclass(frozen=True, slots=True)
 class _Column:
     heading: str
@@ -43,6 +49,10 @@ class DeviceTableModel(QAbstractTableModel):
         _Column("Device path", lambda device: _text(device.device_path)),
         _Column("USB VID", lambda device: _text(device.usb_vid)),
         _Column("USB PID", lambda device: _text(device.usb_pid)),
+        _Column("Bus type", lambda device: _text(device.bus_type)),
+        _Column("Media type", lambda device: _text(device.media_type)),
+        _Column("Can pool", lambda device: _optional_bool(device.can_pool)),
+        _Column("Health", lambda device: _text(device.health_status)),
         _Column("Connected", lambda device: "Yes" if device.is_connected else "No"),
     )
 
@@ -65,7 +75,7 @@ class DeviceTableModel(QAbstractTableModel):
             return self._COLUMNS[index.column()].value(device)
 
         if role == Qt.ItemDataRole.TextAlignmentRole:
-            if index.column() in (2, 5, 6, 7):
+            if index.column() in (2, 5, 6, 7, 8, 9, 10, 11):
                 return Qt.AlignmentFlag.AlignCenter
             return Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
 
@@ -90,4 +100,3 @@ class DeviceTableModel(QAbstractTableModel):
             key=lambda device: (device.device_path or "", device.model or ""),
         )
         self.endResetModel()
-

@@ -25,6 +25,12 @@ def display_value(value: str | None) -> str:
     return value or "Unavailable"
 
 
+def display_optional_bool(value: bool | None) -> str:
+    if value is None:
+        return "Unavailable"
+    return "Yes" if value else "No"
+
+
 def main() -> int:
     try:
         devices = detect_usb_storage_devices()
@@ -48,6 +54,10 @@ def main() -> int:
         print(f"  Device path:  {display_value(device.device_path)}")
         print(f"  USB VID:      {display_value(device.usb_vid)}")
         print(f"  USB PID:      {display_value(device.usb_pid)}")
+        print(f"  Bus type:     {display_value(device.bus_type)}")
+        print(f"  Media type:   {display_value(device.media_type)}")
+        print(f"  Can pool:     {display_optional_bool(device.can_pool)}")
+        print(f"  Health:       {display_value(device.health_status)}")
         print(f"  Connected:    {'Yes' if device.is_connected else 'No'}")
         print()
 
@@ -56,4 +66,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

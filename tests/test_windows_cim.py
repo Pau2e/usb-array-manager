@@ -14,6 +14,10 @@ class RecordConversionTests(unittest.TestCase):
                 "device_path": r"\\.\PHYSICALDRIVE4",
                 "pnp_device_id": r"USB\VID_1234&PID_ABCD\ABC123",
                 "usb_device_id": None,
+                "bus_type": 7,
+                "media_type": 4,
+                "can_pool": False,
+                "health_status": 0,
             }
         )
 
@@ -24,6 +28,10 @@ class RecordConversionTests(unittest.TestCase):
         self.assertEqual(device.usb_vid, "1234")
         self.assertEqual(device.usb_pid, "ABCD")
         self.assertTrue(device.is_connected)
+        self.assertEqual(device.bus_type, "USB")
+        self.assertEqual(device.media_type, "SSD")
+        self.assertFalse(device.can_pool)
+        self.assertEqual(device.health_status, "Healthy")
 
     def test_missing_optional_values_are_allowed(self) -> None:
         device = _record_to_device(
@@ -35,6 +43,10 @@ class RecordConversionTests(unittest.TestCase):
                 "device_path": r"\\.\PHYSICALDRIVE7",
                 "pnp_device_id": r"USBSTOR\DISK&VEN_GENERIC",
                 "usb_device_id": None,
+                "bus_type": None,
+                "media_type": None,
+                "can_pool": None,
+                "health_status": None,
             }
         )
 
@@ -43,6 +55,10 @@ class RecordConversionTests(unittest.TestCase):
         self.assertEqual(device.drive_letters, ())
         self.assertIsNone(device.usb_vid)
         self.assertIsNone(device.usb_pid)
+        self.assertIsNone(device.bus_type)
+        self.assertIsNone(device.media_type)
+        self.assertIsNone(device.can_pool)
+        self.assertIsNone(device.health_status)
 
     def test_parent_usb_id_supplies_vid_pid_and_serial_is_cleaned(self) -> None:
         device = _record_to_device(

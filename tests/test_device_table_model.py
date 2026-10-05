@@ -21,12 +21,16 @@ class DeviceTableModelTests(unittest.TestCase):
                     usb_vid="1234",
                     usb_pid="ABCD",
                     is_connected=True,
+                    bus_type="USB",
+                    media_type="SSD",
+                    can_pool=False,
+                    health_status="Healthy",
                 )
             ]
         )
 
         self.assertEqual(model.rowCount(), 1)
-        self.assertEqual(model.columnCount(), 8)
+        self.assertEqual(model.columnCount(), 12)
         self.assertEqual(
             model.data(model.index(0, 0), Qt.ItemDataRole.DisplayRole),
             "Example USB Disk",
@@ -37,6 +41,14 @@ class DeviceTableModelTests(unittest.TestCase):
         )
         self.assertEqual(
             model.data(model.index(0, 7), Qt.ItemDataRole.DisplayRole),
+            "USB",
+        )
+        self.assertEqual(
+            model.data(model.index(0, 9), Qt.ItemDataRole.DisplayRole),
+            "No",
+        )
+        self.assertEqual(
+            model.data(model.index(0, 11), Qt.ItemDataRole.DisplayRole),
             "Yes",
         )
 
