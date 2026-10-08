@@ -72,6 +72,21 @@ workload, or the behavior of a future RAID implementation.
 
 The planner never creates an array and never writes to a drive.
 
+Version 0.4.1 validates every possible mirror-pair layout for four selected
+drives. Suggestions maximize the sum of each pair's slower sustained write
+speed. When write estimates are tied or within 5%, lower capacity waste is used
+as the secondary decision. If benchmark data is missing, the planner does not
+guess throughput and falls back to minimizing capacity waste. The GUI shows the
+number of layouts evaluated and explains why its suggestion was selected.
+
+Version 0.4.2 adds a read-only failure and degraded-mode simulator to the current
+mirror pairing. Any selected slot can be marked as simulated failed. Each pair is
+shown as `HEALTHY`, `DEGRADED`, or `FAILED`; the complete array remains available
+only while every mirror pair has at least one working member. Degraded read
+estimates use the surviving member's benchmark result. The simulator lists
+working drives, lost redundancy, at-risk pairs, and whether another failure can
+be tolerated. Simulation never changes a disk or creates a RAID array.
+
 Qualification defaults:
 
 - `UNSTABLE`: write-sample coefficient of variation is at least 0.50

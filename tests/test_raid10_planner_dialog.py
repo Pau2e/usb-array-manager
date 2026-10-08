@@ -1,5 +1,6 @@
 import unittest
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from usb_array_manager.models.benchmark_result import BenchmarkResult
@@ -50,6 +51,32 @@ class Raid10PlannerDialogTests(unittest.TestCase):
         self.assertEqual(dialog._pair_table.rowCount(), 2)
         self.assertIn("Complete array estimates", dialog._array_summary.text())
         self.assertIn("ESTIMATE", dialog._pair_table.item(0, 3).text())
+        self.assertIn("Evaluated all 3 valid pairing", dialog._suggestion_reason.text())
+        self.assertIn("HEALTHY", dialog._array_health.text())
+        self.assertEqual(dialog._content_splitter.orientation(), Qt.Orientation.Horizontal)
+        self.assertGreaterEqual(dialog._failure_table.minimumHeight(), 150)
+        self.assertTrue(
+            dialog.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint
+        )
+        self.assertTrue(
+            dialog.windowFlags() & Qt.WindowType.WindowMinimizeButtonHint
+        )
+        self.assertTrue(
+            dialog.windowFlags() & Qt.WindowType.WindowCloseButtonHint
+        )
+
+        dialog._failure_checkboxes[1].setChecked(True)
+        application.processEvents()
+        self.assertIn("DEGRADED", dialog._array_health.text())
+        self.assertEqual(dialog._failure_table.item(0, 2).text(), "DEGRADED")
+
+        dialog._failure_checkboxes[2].setChecked(True)
+        application.processEvents()
+        self.assertIn("FAILED", dialog._array_health.text())
+
+        dialog._reset_failures()
+        self.assertIn("HEALTHY", dialog._array_health.text())
+        self.assertFalse(any(dialog._failure_checkboxes[slot].isChecked() for slot in range(1, 5)))
         dialog.close()
 
 

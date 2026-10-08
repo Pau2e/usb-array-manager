@@ -4,6 +4,7 @@ from usb_array_manager.models.raid_plan import PlannerDrive
 from usb_array_manager.services.raid10_planner import (
     Raid10PlanError,
     estimate_raid10,
+    suggest_mirror_pairing,
     suggest_mirror_pairs,
 )
 
@@ -78,6 +79,113 @@ class Raid10PlannerTests(unittest.TestCase):
             slot_pairs,
             {frozenset((1, 3)), frozenset((2, 4))},
         )
+
+    def test_fast_fast_and_slow_slow_maximizes_write_throughput(self) -> None:
+        drives = [
+            drive(1, 32, 150, 100),
+            drive(2, 32, 150, 95),
+            drive(3, 32, 100, 20),
+            drive(4, 32, 100, 10),
+        ]
+
+        suggestion = suggest_mirror_pairing(drives)
+        slot_pairs = {
+            frozenset((first.slot, second.slot))
+            for first, second in suggestion.pairs
+        }
+
+        self.assertEqual(
+            slot_pairs,
+            {frozenset((1, 2)), frozenset((3, 4))},
+        )
+        self.assertEqual(suggestion.estimated_sustained_write_mbps, 105)
+        self.assertEqual(suggestion.evaluated_layout_count, 3)
+        self.assertIn("highest estimated sustained write", suggestion.explanation)
+
+    def test_fast_slow_capacity_pairs_do_not_override_large_write_loss(self) -> None:
+        drives = [
+            drive(1, 32, 150, 100),
+            drive(2, 64, 150, 100),
+            drive(3, 32, 100, 10),
+            drive(4, 64, 100, 10),
+        ]
+
+        suggestion = suggest_mirror_pairing(drives)
+        slot_pairs = {
+            frozenset((first.slot, second.slot))
+            for first, second in suggestion.pairs
+        }
+
+        self.assertEqual(
+            slot_pairs,
+            {frozenset((1, 2)), frozenset((3, 4))},
+        )
+        self.assertEqual(suggestion.estimated_sustained_write_mbps, 110)
+        self.assertEqual(suggestion.capacity_waste_bytes, 64 * GIB)
+
+    def test_equal_speeds_use_capacity_waste_as_tiebreaker(self) -> None:
+        drives = [
+            drive(1, 32, 150, 50),
+            drive(2, 64, 150, 50),
+            drive(3, 32, 150, 50),
+            drive(4, 64, 150, 50),
+        ]
+
+        suggestion = suggest_mirror_pairing(drives)
+        slot_pairs = {
+            frozenset((first.slot, second.slot))
+            for first, second in suggestion.pairs
+        }
+
+        self.assertEqual(
+            slot_pairs,
+            {frozenset((1, 3)), frozenset((2, 4))},
+        )
+        self.assertEqual(suggestion.capacity_waste_bytes, 0)
+
+    def test_close_write_estimates_prefer_lower_capacity_waste(self) -> None:
+        drives = [
+            drive(1, 32, 150, 100),
+            drive(2, 64, 150, 99),
+            drive(3, 32, 150, 98),
+            drive(4, 64, 150, 97),
+        ]
+
+        suggestion = suggest_mirror_pairing(drives)
+        slot_pairs = {
+            frozenset((first.slot, second.slot))
+            for first, second in suggestion.pairs
+        }
+
+        self.assertEqual(
+            slot_pairs,
+            {frozenset((1, 3)), frozenset((2, 4))},
+        )
+        self.assertEqual(suggestion.estimated_sustained_write_mbps, 195)
+        self.assertEqual(suggestion.capacity_waste_bytes, 0)
+        self.assertIn("within 5%", suggestion.explanation)
+
+    def test_missing_benchmark_data_falls_back_to_capacity_waste(self) -> None:
+        drives = [
+            drive(1, 32, None, None),
+            drive(2, 64, 150, 60),
+            drive(3, 32, 150, 55),
+            drive(4, 64, 150, 50),
+        ]
+
+        suggestion = suggest_mirror_pairing(drives)
+        slot_pairs = {
+            frozenset((first.slot, second.slot))
+            for first, second in suggestion.pairs
+        }
+
+        self.assertEqual(
+            slot_pairs,
+            {frozenset((1, 3)), frozenset((2, 4))},
+        )
+        self.assertIsNone(suggestion.estimated_sustained_write_mbps)
+        self.assertEqual(suggestion.capacity_waste_bytes, 0)
+        self.assertIn("Slot 1 has no benchmark", suggestion.explanation)
 
     def test_duplicate_slot_is_rejected(self) -> None:
         slot1 = drive(1, 32, 150, 60)

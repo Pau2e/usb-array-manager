@@ -9,9 +9,11 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTextBrowser,
@@ -20,12 +22,19 @@ from PySide6.QtWidgets import (
 )
 
 from usb_array_manager.models.benchmark_result import BenchmarkResult
+from usb_array_manager.models.raid_failure import Raid10FailureSimulation
 from usb_array_manager.models.raid_plan import PlannerDrive, Raid10Estimate
 from usb_array_manager.models.storage_device import StorageDevice
 from usb_array_manager.services.raid10_planner import (
     Raid10PlanError,
     estimate_raid10,
-    suggest_mirror_pairs,
+    suggest_mirror_pairing,
+)
+from usb_array_manager.services.raid10_failure_simulator import (
+    ARRAY_DEGRADED,
+    ARRAY_FAILED,
+    FailureSimulationError,
+    simulate_failures,
 )
 
 
@@ -38,10 +47,16 @@ class Raid10PlannerDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("RAID10 Array Planner — simulation only")
-        self.resize(1_080, 780)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, True)
+        self.setMinimumSize(1_100, 650)
+        self.resize(1_500, 800)
         self._drives = _planner_drives(devices, benchmark_results)
         self._checkboxes: dict[int, QCheckBox] = {}
         self._pair_combos: list[tuple[QComboBox, QComboBox]] = []
+        self._current_estimate: Raid10Estimate | None = None
+        self._failure_checkboxes: dict[int, QCheckBox] = {}
 
         heading = QLabel("RAID10 Array Planner — READ-ONLY SIMULATION")
         heading.setStyleSheet("font-size: 18px; font-weight: 600;")
@@ -91,6 +106,10 @@ class Raid10PlannerDialog(QDialog):
         pair_actions.addWidget(self._selection_status, 1)
         pair_actions.addWidget(self._suggest_button)
         pair_layout.addLayout(pair_actions)
+        self._suggestion_reason = QLabel()
+        self._suggestion_reason.setWordWrap(True)
+        self._suggestion_reason.setStyleSheet("color: #2457a6;")
+        pair_layout.addWidget(self._suggestion_reason)
         self._pairs_container = QWidget()
         self._pairs_layout = QVBoxLayout(self._pairs_container)
         self._pairs_layout.setContentsMargins(0, 0, 0, 0)
@@ -116,12 +135,60 @@ class Raid10PlannerDialog(QDialog):
         )
         self._pair_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._pair_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self._pair_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
         self._pair_table.horizontalHeader().setStretchLastSection(True)
+        self._pair_table.verticalHeader().setVisible(False)
+        self._pair_table.verticalHeader().setDefaultSectionSize(30)
+        self._pair_table.setMinimumHeight(150)
+        self._pair_table.setStyleSheet(
+            "QTableWidget { font-size: 10pt; } QHeaderView::section { font-size: 10pt; }"
+        )
         result_layout.addWidget(self._pair_table)
         self._array_summary = QLabel("Select drives and define pairs to calculate estimates.")
         self._array_summary.setTextFormat(Qt.TextFormat.RichText)
         self._array_summary.setWordWrap(True)
         result_layout.addWidget(self._array_summary)
+
+        failure_group = QGroupBox("4. RAID10 failure and degraded-mode simulator")
+        failure_layout = QVBoxLayout(failure_group)
+        failure_actions = QHBoxLayout()
+        failure_note = QLabel(
+            "Mark slots as Simulated failed. This changes the simulation only."
+        )
+        failure_note.setStyleSheet("color: #b00020; font-weight: 600;")
+        self._reset_failures_button = QPushButton("Reset simulated failures")
+        self._reset_failures_button.clicked.connect(self._reset_failures)
+        failure_actions.addWidget(failure_note, 1)
+        failure_actions.addWidget(self._reset_failures_button)
+        failure_layout.addLayout(failure_actions)
+        self._failure_controls = QHBoxLayout()
+        failure_layout.addLayout(self._failure_controls)
+
+        self._failure_table = QTableWidget(0, 5)
+        self._failure_table.setHorizontalHeaderLabels(
+            ("Pair", "Members", "Status", "Working slots", "Current read ESTIMATE")
+        )
+        self._failure_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._failure_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self._failure_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._failure_table.horizontalHeader().setStretchLastSection(True)
+        self._failure_table.verticalHeader().setVisible(False)
+        self._failure_table.verticalHeader().setDefaultSectionSize(34)
+        self._failure_table.setMinimumHeight(150)
+        self._failure_table.setStyleSheet(
+            "QTableWidget { font-size: 10pt; } QHeaderView::section { font-size: 10pt; }"
+        )
+        failure_layout.addWidget(self._failure_table)
+        self._array_health = QLabel("Calculate a valid pairing to start the simulator.")
+        self._array_health.setWordWrap(True)
+        failure_layout.addWidget(self._array_health)
+        self._failure_details = QTextBrowser()
+        self._failure_details.setMaximumHeight(125)
+        failure_layout.addWidget(self._failure_details)
 
         warnings_group = QGroupBox("Warnings")
         warnings_layout = QVBoxLayout(warnings_group)
@@ -150,14 +217,31 @@ class Raid10PlannerDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
 
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(selection_group)
+        left_layout.addWidget(pair_group)
+        left_layout.addWidget(result_group, 1)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(failure_group, 1)
+        right_layout.addWidget(warnings_group)
+        right_layout.addWidget(model_group)
+
+        self._content_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._content_splitter.addWidget(left_panel)
+        self._content_splitter.addWidget(right_panel)
+        self._content_splitter.setStretchFactor(0, 1)
+        self._content_splitter.setStretchFactor(1, 1)
+        self._content_splitter.setSizes((760, 700))
+
         layout = QVBoxLayout(self)
         layout.addWidget(heading)
         layout.addWidget(safety)
-        layout.addWidget(selection_group)
-        layout.addWidget(pair_group)
-        layout.addWidget(result_group, 1)
-        layout.addWidget(warnings_group)
-        layout.addWidget(model_group)
+        layout.addWidget(self._content_splitter, 1)
         layout.addWidget(buttons)
 
         self._selection_changed()
@@ -178,6 +262,7 @@ class Raid10PlannerDialog(QDialog):
                 f"Selected: {len(selected)} — choose an even number of at least 2 drives."
             )
             self._clear_pair_rows()
+            self._suggestion_reason.clear()
             self._clear_results()
             self._show_availability_warnings()
             return
@@ -189,11 +274,12 @@ class Raid10PlannerDialog(QDialog):
 
     def _suggest_pairs(self) -> None:
         try:
-            pairs = suggest_mirror_pairs(self._selected_drives())
+            suggestion = suggest_mirror_pairing(self._selected_drives())
         except Raid10PlanError as error:
             QMessageBox.warning(self, "Invalid drive selection", str(error))
             return
-        self._rebuild_pair_rows(pairs)
+        self._rebuild_pair_rows(list(suggestion.pairs))
+        self._suggestion_reason.setText(suggestion.explanation)
         self._calculate()
 
     def _rebuild_pair_rows(
@@ -209,12 +295,20 @@ class Raid10PlannerDialog(QDialog):
             row_layout.addWidget(QLabel(_pair_name(index)))
             first_combo = _slot_combo(selected_slots, first.slot)
             second_combo = _slot_combo(selected_slots, second.slot)
+            first_combo.currentIndexChanged.connect(self._manual_pairing_changed)
+            second_combo.currentIndexChanged.connect(self._manual_pairing_changed)
             row_layout.addWidget(first_combo)
             row_layout.addWidget(QLabel("+"))
             row_layout.addWidget(second_combo)
             row_layout.addStretch(1)
             self._pairs_layout.addWidget(row)
             self._pair_combos.append((first_combo, second_combo))
+
+    def _manual_pairing_changed(self) -> None:
+        self._suggestion_reason.setText(
+            "Manual override selected. Click Calculate RAID10 estimates to validate it."
+        )
+        self._clear_failure_simulator()
 
     def _clear_pair_rows(self) -> None:
         self._pair_combos.clear()
@@ -295,12 +389,125 @@ class Raid10PlannerDialog(QDialog):
             if warnings
             else "No planner warnings for the selected layout."
         )
+        self._set_failure_estimate(estimate)
 
     def _clear_results(self) -> None:
         self._pair_table.setRowCount(0)
         self._array_summary.setText(
             "Select an even number of connected drives to calculate estimates."
         )
+        self._clear_failure_simulator()
+
+    def _set_failure_estimate(self, estimate: Raid10Estimate) -> None:
+        previous_failures = {
+            slot
+            for slot, checkbox in self._failure_checkboxes.items()
+            if checkbox.isChecked()
+        }
+        self._current_estimate = estimate
+        self._clear_failure_controls()
+        selected_slots = sorted(
+            drive.slot
+            for pair in estimate.pairs
+            for drive in (pair.first, pair.second)
+        )
+        for slot in selected_slots:
+            checkbox = QCheckBox(f"Slot {slot} — Simulated failed")
+            checkbox.setChecked(slot in previous_failures)
+            checkbox.stateChanged.connect(self._simulate_failures)
+            self._failure_checkboxes[slot] = checkbox
+            self._failure_controls.addWidget(checkbox)
+        self._failure_controls.addStretch(1)
+        self._reset_failures_button.setEnabled(True)
+        self._simulate_failures()
+
+    def _simulate_failures(self) -> None:
+        if self._current_estimate is None:
+            return
+        failed_slots = {
+            slot
+            for slot, checkbox in self._failure_checkboxes.items()
+            if checkbox.isChecked()
+        }
+        try:
+            simulation = simulate_failures(self._current_estimate, failed_slots)
+        except FailureSimulationError as error:
+            QMessageBox.warning(self, "Invalid failure simulation", str(error))
+            return
+        self._show_failure_simulation(simulation)
+
+    def _show_failure_simulation(
+        self,
+        simulation: Raid10FailureSimulation,
+    ) -> None:
+        self._failure_table.setRowCount(len(simulation.pair_states))
+        for row, pair in enumerate(simulation.pair_states):
+            values = (
+                pair.label,
+                " + ".join(f"Slot {slot}" for slot in pair.member_slots),
+                pair.status,
+                _slots(pair.working_slots),
+                _read_range(
+                    pair.conservative_read_mbps,
+                    pair.theoretical_max_read_mbps,
+                ),
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._failure_table.setItem(row, column, item)
+        self._failure_table.resizeColumnsToContents()
+
+        color = "#137333"
+        if simulation.array_status == ARRAY_DEGRADED:
+            color = "#9a6700"
+        elif simulation.array_status == ARRAY_FAILED:
+            color = "#b00020"
+        self._array_health.setStyleSheet(
+            f"color: {color}; font-size: 15px; font-weight: 700;"
+        )
+        self._array_health.setText(
+            f"Complete RAID10 status: {simulation.array_status}"
+        )
+
+        self._failure_details.setHtml(
+            f"<b>Why:</b> {simulation.explanation}<br>"
+            f"<b>Remaining working drives:</b> "
+            f"{_slots(simulation.remaining_working_slots)}<br>"
+            f"<b>Lost redundancy:</b> "
+            f"{_names(simulation.lost_redundancy_pairs)}<br>"
+            f"<b>Mirror pairs at risk:</b> {_names(simulation.at_risk_pairs)}<br>"
+            f"<b>Can another failure be tolerated?</b> "
+            f"{simulation.additional_failure_tolerance}<br>"
+            f"<b>Current read performance:</b> "
+            f"{_read_range(simulation.conservative_read_mbps, simulation.theoretical_max_read_mbps)}"
+        )
+
+    def _reset_failures(self) -> None:
+        for checkbox in self._failure_checkboxes.values():
+            checkbox.blockSignals(True)
+            checkbox.setChecked(False)
+            checkbox.blockSignals(False)
+        self._simulate_failures()
+
+    def _clear_failure_controls(self) -> None:
+        self._failure_checkboxes.clear()
+        while self._failure_controls.count():
+            item = self._failure_controls.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _clear_failure_simulator(self) -> None:
+        self._current_estimate = None
+        self._clear_failure_controls()
+        self._failure_table.setRowCount(0)
+        self._array_health.setStyleSheet("")
+        self._array_health.setText(
+            "Calculate a valid pairing to start the simulator."
+        )
+        self._failure_details.clear()
+        self._reset_failures_button.setEnabled(False)
 
     def _show_availability_warnings(self) -> None:
         warnings = self._availability_warnings()
@@ -364,3 +571,22 @@ def _speed(value: float | None) -> str:
 
 def _percent(value: float | None) -> str:
     return f"{value:.1f}%" if value is not None else "Unavailable"
+
+
+def _slots(slots: tuple[int, ...]) -> str:
+    return ", ".join(f"Slot {slot}" for slot in slots) or "None"
+
+
+def _names(names: tuple[str, ...]) -> str:
+    return ", ".join(names) or "None"
+
+
+def _read_range(conservative: float | None, theoretical: float | None) -> str:
+    if conservative is None or theoretical is None:
+        return "Unavailable"
+    if abs(conservative - theoretical) < 1e-9:
+        return f"{conservative:.1f} MB/s ESTIMATE"
+    return (
+        f"{conservative:.1f} MB/s conservative / "
+        f"{theoretical:.1f} MB/s theoretical max"
+    )

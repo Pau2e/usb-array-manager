@@ -36,3 +36,12 @@ class Raid10Estimate:
     conservative_read_mbps: float | None
     theoretical_max_read_mbps: float | None
     warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PairingSuggestion:
+    pairs: tuple[tuple[PlannerDrive, PlannerDrive], ...]
+    estimated_sustained_write_mbps: float | None
+    capacity_waste_bytes: int | None
+    evaluated_layout_count: int
+    explanation: str

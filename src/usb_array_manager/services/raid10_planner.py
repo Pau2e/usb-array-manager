@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from usb_array_manager.models.raid_plan import (
     MirrorPairEstimate,
+    PairingSuggestion,
     PlannerDrive,
     Raid10Estimate,
 )
@@ -9,6 +10,7 @@ from usb_array_manager.models.raid_plan import (
 
 SLOW_WRITE_THRESHOLD_MBPS = 20.0
 WRITE_MISMATCH_RATIO = 0.75
+NEAR_WRITE_TOLERANCE_PERCENT = 5.0
 
 
 class Raid10PlanError(ValueError):
@@ -66,14 +68,34 @@ def estimate_raid10(
 def suggest_mirror_pairs(
     drives: list[PlannerDrive],
 ) -> list[tuple[PlannerDrive, PlannerDrive]]:
+    return list(suggest_mirror_pairing(drives).pairs)
+
+
+def suggest_mirror_pairing(drives: list[PlannerDrive]) -> PairingSuggestion:
     if len(drives) < 2 or len(drives) % 2:
         raise Raid10PlanError("Select an even number of at least two drives.")
     if len({drive.slot for drive in drives}) != len(drives):
         raise Raid10PlanError("Selected slots must be unique.")
 
     ordered = sorted(drives, key=lambda drive: drive.slot)
-    _score, pairs = _best_pairing(ordered)
-    return pairs
+    candidates = [
+        _PairingCandidate(
+            pairs=tuple(pairs),
+            estimated_write_mbps=_pairing_write_estimate(pairs),
+            capacity_waste_bytes=_pairing_capacity_waste(pairs),
+        )
+        for pairs in _all_pairings(ordered)
+    ]
+    selected, explanation = _select_candidate(candidates, ordered)
+    return PairingSuggestion(
+        pairs=selected.pairs,
+        estimated_sustained_write_mbps=selected.estimated_write_mbps,
+        capacity_waste_bytes=selected.capacity_waste_bytes,
+        evaluated_layout_count=len(candidates),
+        explanation=(
+            f"Evaluated all {len(candidates)} valid pairing(s). {explanation}"
+        ),
+    )
 
 
 def _estimate_pair(
@@ -174,43 +196,139 @@ def _bottleneck(first: PlannerDrive, second: PlannerDrive) -> str:
     return "Balanced"
 
 
-def _best_pairing(
+class _PairingCandidate:
+    def __init__(
+        self,
+        *,
+        pairs: tuple[tuple[PlannerDrive, PlannerDrive], ...],
+        estimated_write_mbps: float | None,
+        capacity_waste_bytes: int | None,
+    ) -> None:
+        self.pairs = pairs
+        self.estimated_write_mbps = estimated_write_mbps
+        self.capacity_waste_bytes = capacity_waste_bytes
+
+    @property
+    def slot_signature(self) -> tuple[tuple[int, int], ...]:
+        return tuple(
+            (min(first.slot, second.slot), max(first.slot, second.slot))
+            for first, second in self.pairs
+        )
+
+
+def _all_pairings(
     drives: list[PlannerDrive],
-) -> tuple[float, list[tuple[PlannerDrive, PlannerDrive]]]:
+) -> list[list[tuple[PlannerDrive, PlannerDrive]]]:
     if not drives:
-        return 0.0, []
+        return [[]]
 
     first = drives[0]
-    best_score = float("-inf")
-    best_pairs: list[tuple[PlannerDrive, PlannerDrive]] = []
+    layouts: list[list[tuple[PlannerDrive, PlannerDrive]]] = []
     for index in range(1, len(drives)):
         second = drives[index]
         remaining = drives[1:index] + drives[index + 1 :]
-        remaining_score, remaining_pairs = _best_pairing(remaining)
-        score = _pairing_score(first, second) + remaining_score
-        candidate = [(first, second), *remaining_pairs]
-        if score > best_score:
-            best_score = score
-            best_pairs = candidate
-    return best_score, best_pairs
+        for remaining_pairs in _all_pairings(remaining):
+            layouts.append([(first, second), *remaining_pairs])
+    return layouts
 
 
-def _pairing_score(first: PlannerDrive, second: PlannerDrive) -> float:
-    capacity_similarity = _similarity(first.capacity_bytes, second.capacity_bytes)
-    write_similarity = _similarity(
-        first.sustained_write_mbps,
-        second.sustained_write_mbps,
+def _select_candidate(
+    candidates: list[_PairingCandidate],
+    drives: list[PlannerDrive],
+) -> tuple[_PairingCandidate, str]:
+    complete_write_data = all(
+        drive.sustained_write_mbps is not None for drive in drives
     )
-    return capacity_similarity * 2.0 + write_similarity
+    if not complete_write_data:
+        selected = min(candidates, key=_capacity_then_signature)
+        missing = ", ".join(
+            f"Slot {drive.slot}"
+            for drive in drives
+            if drive.sustained_write_mbps is None
+        )
+        return selected, (
+            f"Sustained-write comparison is unavailable because {missing} has no "
+            f"benchmark. Selected the layout with {_waste_text(selected)} capacity waste."
+        )
+
+    best_write = max(
+        candidate.estimated_write_mbps or 0.0 for candidate in candidates
+    )
+    tolerance = max(1.0, best_write * NEAR_WRITE_TOLERANCE_PERCENT / 100)
+    near_best = [
+        candidate
+        for candidate in candidates
+        if best_write - (candidate.estimated_write_mbps or 0.0) <= tolerance
+    ]
+    selected = min(
+        near_best,
+        key=lambda candidate: (
+            _waste_sort_value(candidate),
+            -(candidate.estimated_write_mbps or 0.0),
+            candidate.slot_signature,
+        ),
+    )
+    selected_write = selected.estimated_write_mbps or 0.0
+    if abs(selected_write - best_write) < 1e-9:
+        return selected, (
+            "Suggested because this pairing gives the highest estimated sustained "
+            f"write throughput ({selected_write:.1f} MB/s) with "
+            f"{_waste_text(selected)} capacity waste."
+        )
+    return selected, (
+        f"Write estimates are within {NEAR_WRITE_TOLERANCE_PERCENT:.0f}% of the best. "
+        f"Selected {selected_write:.1f} MB/s instead of {best_write:.1f} MB/s to "
+        f"reduce capacity waste to {_waste_text(selected)}."
+    )
 
 
-def _similarity(first: float | int | None, second: float | int | None) -> float:
-    if first is None and second is None:
-        return 0.5
-    if first is None or second is None:
-        return 0.0
-    larger = max(first, second)
-    return min(first, second) / larger if larger > 0 else 1.0
+def _pairing_write_estimate(
+    pairs: list[tuple[PlannerDrive, PlannerDrive]],
+) -> float | None:
+    speeds = [
+        drive.sustained_write_mbps
+        for pair in pairs
+        for drive in pair
+    ]
+    if any(speed is None for speed in speeds):
+        return None
+    return sum(
+        min(first.sustained_write_mbps, second.sustained_write_mbps)
+        for first, second in pairs
+        if first.sustained_write_mbps is not None
+        and second.sustained_write_mbps is not None
+    )
+
+
+def _pairing_capacity_waste(
+    pairs: list[tuple[PlannerDrive, PlannerDrive]],
+) -> int | None:
+    capacities = [drive.capacity_bytes for pair in pairs for drive in pair]
+    if any(capacity is None for capacity in capacities):
+        return None
+    return sum(
+        abs(first.capacity_bytes - second.capacity_bytes)
+        for first, second in pairs
+        if first.capacity_bytes is not None and second.capacity_bytes is not None
+    )
+
+
+def _capacity_then_signature(candidate: _PairingCandidate):
+    return (_waste_sort_value(candidate), candidate.slot_signature)
+
+
+def _waste_sort_value(candidate: _PairingCandidate) -> float:
+    return (
+        float(candidate.capacity_waste_bytes)
+        if candidate.capacity_waste_bytes is not None
+        else float("inf")
+    )
+
+
+def _waste_text(candidate: _PairingCandidate) -> str:
+    if candidate.capacity_waste_bytes is None:
+        return "unknown"
+    return f"{candidate.capacity_waste_bytes / 1024**3:.1f} GiB"
 
 
 def _has_benchmark(drive: PlannerDrive) -> bool:
