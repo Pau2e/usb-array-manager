@@ -164,3 +164,158 @@ class DeviceTableModel(QAbstractTableModel):
 
 def _speed(value: float | None) -> str:
     return f"{value:.1f}" if value is not None else "—"
+
+
+def _identity(device: StorageDevice) -> str:
+    primary = device.serial_number or "No serial"
+    identity = (
+        device.storage_unique_id
+        or device.container_id
+        or device.usb_device_id
+        or device.pnp_device_id
+    )
+    return f"{primary} · {identity}" if identity else primary
+
+
+class _FocusedDeviceTableModel(QAbstractTableModel):
+    _HEADINGS: tuple[str, ...] = ()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._devices: list[StorageDevice] = []
+        self._benchmark_results: dict[int, BenchmarkResult] = {}
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._devices)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._HEADINGS)
+
+    def headerData(
+        self,
+        section: int,
+        orientation: Qt.Orientation,
+        role: int = Qt.ItemDataRole.DisplayRole,
+    ):
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == Qt.Orientation.Horizontal:
+            return self._HEADINGS[section]
+        return str(section + 1)
+
+    def set_devices(self, devices: list[StorageDevice]) -> None:
+        self.beginResetModel()
+        self._devices = sorted(
+            devices,
+            key=lambda device: (
+                device.slot is None,
+                device.slot if device.slot is not None else 5,
+                device.device_path or "",
+                device.model or "",
+            ),
+        )
+        self.endResetModel()
+
+    def set_benchmark_results(
+        self, results: dict[int, BenchmarkResult]
+    ) -> None:
+        self.beginResetModel()
+        self._benchmark_results = dict(results)
+        self.endResetModel()
+
+    def device_at(self, row: int) -> StorageDevice | None:
+        if 0 <= row < len(self._devices):
+            return self._devices[row]
+        return None
+
+    def devices(self) -> tuple[StorageDevice, ...]:
+        return tuple(self._devices)
+
+    def _result(self, device: StorageDevice) -> BenchmarkResult | None:
+        return (
+            self._benchmark_results.get(device.slot)
+            if device.slot is not None
+            else None
+        )
+
+
+class OverviewTableModel(_FocusedDeviceTableModel):
+    _HEADINGS = (
+        "Slot",
+        "Model",
+        "Serial / identity",
+        "Capacity",
+        "Drive letter",
+        "Physical device",
+        "Bus type",
+        "Media type",
+        "Health",
+        "Connected",
+        "Qualification",
+    )
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
+            device = self._devices[index.row()]
+            result = self._result(device)
+            values = (
+                f"Slot {device.slot}" if device.slot is not None else "Unassigned",
+                _text(device.model),
+                _identity(device),
+                _format_capacity(device.capacity_bytes),
+                ", ".join(device.drive_letters) or "None",
+                _text(device.device_path),
+                _text(device.bus_type),
+                _text(device.media_type),
+                _text(device.health_status),
+                "Yes" if device.is_connected else "No",
+                result.qualification if result else "NOT TESTED",
+            )
+            return values[index.column()]
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if index.column() in (1, 2, 5):
+                return Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+            return Qt.AlignmentFlag.AlignCenter
+        return None
+
+
+class BenchmarkTableModel(_FocusedDeviceTableModel):
+    _HEADINGS = (
+        "Logical slot",
+        "Model",
+        "Read MB/s",
+        "Write MB/s",
+        "Sustained write MB/s",
+        "Qualification",
+        "Last benchmark",
+        "Benchmark control",
+    )
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
+            device = self._devices[index.row()]
+            result = self._result(device)
+            values = (
+                f"Slot {device.slot}" if device.slot is not None else "Unassigned",
+                _text(device.model),
+                _speed(result.sequential_read_mbps if result else None),
+                _speed(result.sequential_write_mbps if result else None),
+                _speed(result.sustained_write_mbps if result else None),
+                result.qualification if result else "NOT TESTED",
+                result.tested_at if result else "Never",
+                "",
+            )
+            return values[index.column()]
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if index.column() == 1:
+                return Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+            return Qt.AlignmentFlag.AlignCenter
+        return None
+
+    @classmethod
+    def benchmark_action_column(cls) -> int:
+        return len(cls._HEADINGS) - 1

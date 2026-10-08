@@ -6,19 +6,13 @@ from pathlib import Path
 from PySide6.QtCore import QDateTime, QThread, QTimer, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QApplication,
     QCheckBox,
-    QHBoxLayout,
-    QHeaderView,
     QInputDialog,
-    QLabel,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
     QPushButton,
-    QTableView,
-    QVBoxLayout,
+    QTabWidget,
     QWidget,
 )
 
@@ -52,7 +46,7 @@ from usb_array_manager.services.windows_cim import (
     DeviceDetectionError,
     detect_usb_storage_devices,
 )
-from usb_array_manager.ui.device_table_model import DeviceTableModel
+from usb_array_manager.ui.device_tabs import BenchmarksTab, LogsTab, OverviewTab
 from usb_array_manager.ui.raid10_planner_dialog import Raid10PlannerDialog
 
 
@@ -137,66 +131,33 @@ class MainWindow(QMainWindow):
         self._benchmark_settings = BenchmarkSettings()
         self._benchmark_results: dict[int, BenchmarkResult] = {}
         self._benchmark_buttons: list[QPushButton] = []
+        self._raid10_workspace: Raid10PlannerDialog | None = None
+        self._last_inventory_signature: tuple | None = None
+        self._last_readiness_text: str | None = None
 
-        self.setWindowTitle("USB Array Manager — Inventory, benchmark, and RAID10 planner")
-        self.resize(1_560, 500)
+        self.setWindowTitle("USB Array Manager 0.5.1 — Read-only planning workspace")
+        self.setMinimumSize(1_050, 650)
+        self.resize(1_350, 780)
 
-        self._model = DeviceTableModel()
-        self._table = QTableView()
-        self._table.setModel(self._model)
-        self._table.setAlternatingRowColors(True)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.verticalHeader().setVisible(False)
-        self._table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents
-        )
-        self._table.horizontalHeader().setStretchLastSection(True)
+        self._overview_tab = OverviewTab()
+        self._benchmarks_tab = BenchmarksTab()
+        self._logs_tab = LogsTab()
+        self._model = self._overview_tab.model
+        self._table = self._overview_tab.table
+        self._benchmark_model = self._benchmarks_tab.model
+        self._benchmark_table = self._benchmarks_tab.table
+        self._status = self._overview_tab.status
+        self._progress = self._benchmarks_tab.progress
+        self._cancel_benchmark_button = self._benchmarks_tab.cancel_button
+        self._refresh_button = self._overview_tab.refresh_button
+        self._assign_slot_button = self._overview_tab.assign_button
 
-        title = QLabel("Connected USB storage devices")
-        title.setStyleSheet("font-size: 18px; font-weight: 600;")
-
-        safety_note = QLabel(
-            "Inventory is read-only. Benchmarks write only a temporary file after confirmation."
-        )
-        safety_note.setStyleSheet("color: #555;")
-
-        self._status = QLabel("Waiting for the first scan…")
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 100)
-        self._progress.setVisible(False)
-        self._cancel_benchmark_button = QPushButton("Cancel benchmark")
-        self._cancel_benchmark_button.setVisible(False)
         self._cancel_benchmark_button.clicked.connect(self._cancel_benchmark)
-        self._refresh_button = QPushButton("Refresh now")
         self._refresh_button.clicked.connect(self.refresh_devices)
-        self._assign_slot_button = QPushButton("Assign/change slot…")
-        self._assign_slot_button.setEnabled(False)
         self._assign_slot_button.clicked.connect(self._assign_selected_slot)
-        self._raid10_button = QPushButton("Plan RAID10…")
-        self._raid10_button.clicked.connect(self._open_raid10_planner)
         self._table.selectionModel().selectionChanged.connect(
             self._update_slot_button
         )
-
-        status_row = QHBoxLayout()
-        status_row.addWidget(self._status, 1)
-        status_row.addWidget(self._progress)
-        status_row.addWidget(self._cancel_benchmark_button)
-        status_row.addWidget(self._raid10_button)
-        status_row.addWidget(self._assign_slot_button)
-        status_row.addWidget(self._refresh_button)
-
-        layout = QVBoxLayout()
-        layout.addWidget(title)
-        layout.addWidget(safety_note)
-        layout.addWidget(self._table, 1)
-        layout.addLayout(status_row)
-
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
 
         try:
             self._benchmark_results = self._benchmark_store.load_all()
@@ -204,7 +165,9 @@ class MainWindow(QMainWindow):
             self._status.setStyleSheet("color: #b00020;")
             self._status.setText("Saved benchmark results could not be loaded.")
             self._status.setToolTip(str(error))
+            self._log("Benchmark results", str(error))
         self._model.set_benchmark_results(self._benchmark_results)
+        self._benchmark_model.set_benchmark_results(self._benchmark_results)
 
         try:
             self._saved_raid10_plan = self._raid10_plan_store.load()
@@ -212,6 +175,21 @@ class MainWindow(QMainWindow):
             self._status.setStyleSheet("color: #b00020;")
             self._status.setText("Saved RAID10 plan could not be loaded.")
             self._status.setToolTip(str(error))
+            self._log("Saved plan", str(error))
+
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        self._tabs.addTab(self._overview_tab, "Overview")
+        self._tabs.addTab(self._benchmarks_tab, "Benchmarks")
+        self._tabs.addTab(self._logs_tab, "Logs / Details")
+        self.setCentralWidget(self._tabs)
+        self._rebuild_raid_workspace(preserve_state=False)
+        if self._saved_raid10_plan is not None:
+            self._log(
+                "Saved plan",
+                f"Loaded {len(self._saved_raid10_plan.pairs)} mirror pair(s) from "
+                f"{self._raid10_plan_store.path}.",
+            )
 
         self._device_change_timer = QTimer(self)
         self._device_change_timer.setSingleShot(True)
@@ -255,12 +233,15 @@ class MainWindow(QMainWindow):
             displayed_devices = self._slot_store.reconcile(devices)
         except SlotStoreError as error:
             self._model.set_devices(devices)
+            self._benchmark_model.set_devices(devices)
             self._status.setStyleSheet("color: #b00020;")
             self._status.setText("Slot configuration could not be loaded.")
             self._status.setToolTip(str(error))
+            self._log("Slot reconciliation", str(error))
             return
 
         self._model.set_devices(displayed_devices)
+        self._benchmark_model.set_devices(displayed_devices)
         self._install_benchmark_buttons()
         updated_at = QDateTime.currentDateTime().toString("HH:mm:ss")
         disconnected_count = sum(
@@ -275,19 +256,35 @@ class MainWindow(QMainWindow):
             f"{len(devices)} connected USB storage device(s){disconnected_text} "
             f"— updated {updated_at}"
         )
+        signature = _inventory_signature(displayed_devices)
+        if signature != self._last_inventory_signature:
+            self._log(
+                "Inventory",
+                f"Reconciled {len(devices)} connected device(s); "
+                f"{disconnected_count} reserved slot(s) disconnected.",
+            )
+            self._last_inventory_signature = signature
+            self._rebuild_raid_workspace()
 
     def _show_error(self, message: str) -> None:
         self._status.setStyleSheet("color: #b00020;")
         self._status.setText("Device scan failed. Hover here for details.")
         self._status.setToolTip(message)
+        self._log("Device scan error", message)
 
     def _device_change_detected(self) -> None:
         if self._closing:
             return
 
+        change_already_pending = self._device_change_timer.isActive()
         self._rescan_requested = True
         self._status.setStyleSheet("")
         self._status.setText("USB hardware change detected…")
+        if not change_already_pending:
+            self._log(
+                "USB hardware",
+                "Insertion, removal, or device-tree change detected.",
+            )
         self._device_change_timer.start()
 
     def _update_slot_button(self) -> None:
@@ -346,9 +343,11 @@ class MainWindow(QMainWindow):
             )
         except SlotConflictError as error:
             QMessageBox.warning(self, "Slot already reserved", str(error))
+            self._log("Slot assignment", str(error))
             return
         except SlotStoreError as error:
             QMessageBox.warning(self, "Slot configuration error", str(error))
+            self._log("Slot assignment", str(error))
             return
 
         changed_slots = tuple(
@@ -359,9 +358,10 @@ class MainWindow(QMainWindow):
             self._benchmark_results = self._benchmark_store.load_all()
         except BenchmarkStoreError as error:
             QMessageBox.warning(self, "Benchmark results error", str(error))
-        self._model.set_benchmark_results(self._benchmark_results)
+        self._set_benchmark_results_on_models()
 
         self._model.set_devices(displayed_devices)
+        self._benchmark_model.set_devices(displayed_devices)
         self._install_benchmark_buttons()
         assignment = (
             f"Slot {selected_slot}" if selected_slot is not None else "Unassigned"
@@ -370,13 +370,21 @@ class MainWindow(QMainWindow):
         self._status.setText(
             f"Saved as {assignment} — {self._slot_store.path}"
         )
+        self._log(
+            "Slot assignment",
+            f"{device.model or 'USB device'} changed from "
+            f"{f'Slot {device.slot}' if device.slot is not None else 'Unassigned'} "
+            f"to {assignment}; affected benchmark results were invalidated.",
+        )
+        self._last_inventory_signature = _inventory_signature(displayed_devices)
+        self._rebuild_raid_workspace()
 
     def _install_benchmark_buttons(self) -> None:
         self._benchmark_buttons.clear()
-        action_column = self._model.benchmark_action_column()
+        action_column = self._benchmark_model.benchmark_action_column()
         benchmark_running = self._benchmark_thread is not None
-        for row in range(self._model.rowCount()):
-            device = self._model.device_at(row)
+        for row in range(self._benchmark_model.rowCount()):
+            device = self._benchmark_model.device_at(row)
             if (
                 device is None
                 or not device.is_connected
@@ -397,30 +405,91 @@ class MainWindow(QMainWindow):
             button.clicked.connect(
                 lambda _checked=False, selected=device: self._start_benchmark(selected)
             )
-            self._table.setIndexWidget(self._model.index(row, action_column), button)
+            self._benchmark_table.setIndexWidget(
+                self._benchmark_model.index(row, action_column), button
+            )
             self._benchmark_buttons.append(button)
 
     def _open_raid10_planner(self) -> None:
+        if self._raid10_workspace is not None:
+            self._tabs.setCurrentWidget(self._raid10_workspace.planner_page)
+
+    def _rebuild_raid_workspace(self, *, preserve_state: bool = True) -> None:
+        current_widget = self._tabs.currentWidget()
+        old_workspace = self._raid10_workspace
+        pairs = (
+            old_workspace.current_pairs()
+            if preserve_state and old_workspace is not None
+            else None
+        )
+        failed_slots = (
+            old_workspace.simulated_failed_slots()
+            if preserve_state and old_workspace is not None
+            else frozenset()
+        )
+        was_planner = (
+            old_workspace is not None
+            and current_widget is old_workspace.planner_page
+        )
+        was_failure = (
+            old_workspace is not None
+            and current_widget is old_workspace.failure_page
+        )
+        if old_workspace is not None:
+            for page in (old_workspace.planner_page, old_workspace.failure_page):
+                index = self._tabs.indexOf(page)
+                if index >= 0:
+                    self._tabs.removeTab(index)
+            old_workspace.deleteLater()
+
         try:
             ambiguous_slots = self._slot_store.ambiguous_slots(
                 self._connected_devices
             )
         except SlotStoreError as error:
-            QMessageBox.warning(self, "Slot configuration error", str(error))
             ambiguous_slots = set()
-        dialog = Raid10PlannerDialog(
+            self._log("Slot reconciliation", str(error))
+
+        workspace = Raid10PlannerDialog(
             self._model.devices(),
             self._benchmark_results,
             self,
             plan_store=self._raid10_plan_store,
             saved_plan=self._saved_raid10_plan,
             ambiguous_slots=ambiguous_slots,
+            embedded=True,
+            initial_pairs=pairs,
+            initial_failed_slots=failed_slots,
         )
-        dialog.exec()
-        try:
-            self._saved_raid10_plan = self._raid10_plan_store.load()
-        except Raid10PlanStoreError as error:
-            QMessageBox.warning(self, "Saved RAID10 plan error", str(error))
+        workspace.plan_saved.connect(self._raid_plan_saved)
+        workspace.diagnostic.connect(self._log)
+        self._raid10_workspace = workspace
+        self._tabs.insertTab(2, workspace.planner_page, "RAID10 Planner")
+        self._tabs.insertTab(3, workspace.failure_page, "Failure Simulator")
+        if was_planner:
+            self._tabs.setCurrentWidget(workspace.planner_page)
+        elif was_failure:
+            self._tabs.setCurrentWidget(workspace.failure_page)
+
+        readiness_text = workspace._readiness_status.text()
+        inventory_is_available = self._last_inventory_signature is not None
+        if (
+            readiness_text != self._last_readiness_text
+            and (inventory_is_available or self._saved_raid10_plan is None)
+        ):
+            self._log("Plan validation", readiness_text)
+            self._last_readiness_text = readiness_text
+
+    def _raid_plan_saved(self, plan: SavedRaid10Plan) -> None:
+        self._saved_raid10_plan = plan
+        self._last_readiness_text = None
+
+    def _set_benchmark_results_on_models(self) -> None:
+        self._model.set_benchmark_results(self._benchmark_results)
+        self._benchmark_model.set_benchmark_results(self._benchmark_results)
+
+    def _log(self, category: str, message: str) -> None:
+        self._logs_tab.add_entry(category, message)
 
     def _start_benchmark(self, device: StorageDevice) -> None:
         if self._benchmark_thread is not None or device.slot is None:
@@ -457,6 +526,10 @@ class MainWindow(QMainWindow):
         random_checkbox = QCheckBox("Include lightweight random 4K test")
         warning.setCheckBox(random_checkbox)
         if warning.exec() != QMessageBox.StandardButton.Yes:
+            self._log(
+                "Benchmark",
+                f"Slot {device.slot} benchmark was not started; confirmation was cancelled.",
+            )
             return
 
         self._benchmark_thread = BenchmarkThread(
@@ -481,19 +554,28 @@ class MainWindow(QMainWindow):
         self._cancel_benchmark_button.setVisible(True)
         self._assign_slot_button.setEnabled(False)
         self._install_benchmark_buttons()
+        self._benchmarks_tab.status.setStyleSheet("")
+        self._benchmarks_tab.status.setText(f"Starting benchmark for Slot {device.slot}…")
+        self._log(
+            "Benchmark",
+            f"Started Slot {device.slot} on {drive_letter}; temporary-file safety checks passed.",
+        )
         self._benchmark_thread.start()
 
     def _show_benchmark_progress(self, percent: int, message: str) -> None:
         self._progress.setValue(percent)
-        self._status.setStyleSheet("")
-        self._status.setText(message)
+        self._benchmarks_tab.status.setStyleSheet("")
+        self._benchmarks_tab.status.setText(message)
 
     def _cancel_benchmark(self) -> None:
         if self._benchmark_thread is None:
             return
         self._benchmark_thread.cancel()
         self._cancel_benchmark_button.setEnabled(False)
-        self._status.setText("Cancelling safely and deleting the temporary file…")
+        self._benchmarks_tab.status.setText(
+            "Cancelling safely and deleting the temporary file…"
+        )
+        self._log("Benchmark", "Cancellation requested; cleanup is in progress.")
 
     def _benchmark_succeeded(self, result: BenchmarkResult) -> None:
         self._benchmark_results[result.slot] = result
@@ -501,10 +583,17 @@ class MainWindow(QMainWindow):
             self._benchmark_store.save(result)
         except BenchmarkStoreError as error:
             QMessageBox.warning(self, "Could not save benchmark result", str(error))
-        self._model.set_benchmark_results(self._benchmark_results)
-        self._status.setText(
+        self._set_benchmark_results_on_models()
+        self._benchmarks_tab.status.setText(
             f"Slot {result.slot}: {result.qualification} — benchmark complete"
         )
+        self._log(
+            "Benchmark",
+            f"Slot {result.slot} completed with {result.qualification}; "
+            f"read {result.sequential_read_mbps:.1f} MB/s, sustained write "
+            f"{result.sustained_write_mbps:.1f} MB/s.",
+        )
+        self._rebuild_raid_workspace()
 
         random_text = ""
         if result.random_4k_read_iops is not None:
@@ -524,13 +613,19 @@ class MainWindow(QMainWindow):
         )
 
     def _benchmark_failed(self, message: str) -> None:
-        self._status.setStyleSheet("color: #b00020;")
-        self._status.setText("Benchmark failed; temporary-file cleanup was attempted.")
+        self._benchmarks_tab.status.setStyleSheet("color: #b00020;")
+        self._benchmarks_tab.status.setText(
+            "Benchmark failed; temporary-file cleanup was attempted."
+        )
+        self._log("Benchmark error", message)
         QMessageBox.warning(self, "Benchmark failed", message)
 
     def _benchmark_cancelled(self) -> None:
-        self._status.setStyleSheet("")
-        self._status.setText("Benchmark cancelled; temporary file deleted.")
+        self._benchmarks_tab.status.setStyleSheet("")
+        self._benchmarks_tab.status.setText(
+            "Benchmark cancelled; temporary file deleted."
+        )
+        self._log("Benchmark", "Benchmark cancelled; temporary file deleted.")
 
     def _benchmark_finished(self) -> None:
         thread = self._benchmark_thread
@@ -579,7 +674,29 @@ class MainWindow(QMainWindow):
             if self._benchmark_thread is not None:
                 self._benchmark_thread.cancel()
             self._status.setText("Finishing safely and deleting temporary files…")
+            self._benchmarks_tab.status.setText(
+                "Finishing safely and deleting temporary files…"
+            )
             event.ignore()
             return
         self._remove_native_event_filter()
         event.accept()
+
+
+def _inventory_signature(devices: list[StorageDevice]) -> tuple:
+    return tuple(
+        (
+            device.slot,
+            device.model,
+            device.serial_number,
+            device.capacity_bytes,
+            device.drive_letters,
+            device.device_path,
+            device.pnp_device_id,
+            device.storage_unique_id,
+            device.container_id,
+            device.health_status,
+            device.is_connected,
+        )
+        for device in devices
+    )

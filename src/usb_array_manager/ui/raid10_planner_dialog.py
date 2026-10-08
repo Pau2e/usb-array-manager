@@ -3,7 +3,7 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextBrowser,
@@ -54,6 +55,9 @@ from usb_array_manager.services.raid10_readiness import (
 
 
 class Raid10PlannerDialog(QDialog):
+    plan_saved = Signal(object)
+    diagnostic = Signal(str, str)
+
     def __init__(
         self,
         devices: tuple[StorageDevice, ...],
@@ -63,6 +67,9 @@ class Raid10PlannerDialog(QDialog):
         plan_store: Raid10PlanStore | None = None,
         saved_plan: SavedRaid10Plan | None = None,
         ambiguous_slots: set[int] | frozenset[int] = frozenset(),
+        embedded: bool = False,
+        initial_pairs: tuple[tuple[int, int], ...] | None = None,
+        initial_failed_slots: set[int] | frozenset[int] = frozenset(),
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("RAID10 Array Planner — simulation only")
@@ -81,6 +88,7 @@ class Raid10PlannerDialog(QDialog):
         self._pair_combos: list[tuple[QComboBox, QComboBox]] = []
         self._current_estimate: Raid10Estimate | None = None
         self._failure_checkboxes: dict[int, QCheckBox] = {}
+        self._initial_failed_slots = frozenset(initial_failed_slots)
 
         heading = QLabel("RAID10 Array Planner — READ-ONLY SIMULATION")
         heading.setStyleSheet("font-size: 18px; font-weight: 600;")
@@ -104,9 +112,12 @@ class Raid10PlannerDialog(QDialog):
                 f"Slot {slot} — {drive.model} — {_capacity(drive.capacity_bytes)} "
                 f"— {state} — {benchmark}"
             )
-            checkbox.setChecked(
-                slot in saved_plan.slots if saved_plan is not None else drive.is_connected
+            initial_slots = (
+                {member for pair in initial_pairs for member in pair}
+                if initial_pairs is not None
+                else set(saved_plan.slots) if saved_plan is not None else set()
             )
+            checkbox.setChecked(slot in initial_slots if initial_slots else drive.is_connected)
             checkbox.setEnabled(drive.is_connected)
             checkbox.stateChanged.connect(self._selection_changed)
             self._checkboxes[slot] = checkbox
@@ -259,20 +270,16 @@ class Raid10PlannerDialog(QDialog):
         )
         model_layout.addWidget(model_text)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(selection_group)
         left_layout.addWidget(pair_group)
-        left_layout.addWidget(result_group, 1)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(failure_group, 1)
+        right_layout.addWidget(result_group, 1)
         right_layout.addWidget(warnings_group)
         right_layout.addWidget(readiness_group)
         right_layout.addWidget(model_group)
@@ -284,29 +291,71 @@ class Raid10PlannerDialog(QDialog):
         self._content_splitter.setStretchFactor(1, 1)
         self._content_splitter.setSizes((760, 700))
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(heading)
-        layout.addWidget(safety)
-        layout.addWidget(self._content_splitter, 1)
-        layout.addWidget(buttons)
+        self.planner_page = QWidget()
+        planner_layout = QVBoxLayout(self.planner_page)
+        planner_layout.addWidget(heading)
+        planner_layout.addWidget(safety)
+        planner_layout.addWidget(self._content_splitter, 1)
 
-        if saved_plan is not None and all(slot in self._drives for slot in saved_plan.slots):
+        self.failure_page = QWidget()
+        failure_heading = QLabel("RAID10 Failure Simulator — SIMULATION ONLY")
+        failure_heading.setStyleSheet("font-size: 18px; font-weight: 600;")
+        failure_safety = QLabel(
+            "Failure selections affect the shared planner estimate only. "
+            "They never change a disk or saved slot."
+        )
+        failure_safety.setStyleSheet("color: #b00020; font-weight: 600;")
+        failure_layout_page = QVBoxLayout(self.failure_page)
+        failure_layout_page.addWidget(failure_heading)
+        failure_layout_page.addWidget(failure_safety)
+        failure_layout_page.addWidget(failure_group, 1)
+
+        if not embedded:
+            tabs = QTabWidget()
+            tabs.addTab(self.planner_page, "RAID10 Planner")
+            tabs.addTab(self.failure_page, "Failure Simulator")
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            buttons.rejected.connect(self.reject)
+            layout = QVBoxLayout(self)
+            layout.addWidget(tabs, 1)
+            layout.addWidget(buttons)
+
+        loaded_pairs = initial_pairs or (
+            saved_plan.pairs if saved_plan is not None else None
+        )
+        if loaded_pairs is not None and all(
+            slot in self._drives for pair in loaded_pairs for slot in pair
+        ):
             pairs = [
                 (self._drives[first], self._drives[second])
-                for first, second in saved_plan.pairs
+                for first, second in loaded_pairs
             ]
             self._selection_status.setText(
-                f"Loaded saved plan: {len(saved_plan.slots)} drive(s), "
-                f"{len(saved_plan.pairs)} mirror pair(s)."
+                f"Loaded plan state: {len(loaded_pairs) * 2} drive(s), "
+                f"{len(loaded_pairs)} mirror pair(s)."
             )
             self._rebuild_pair_rows(pairs)
             self._suggestion_reason.setText(
-                f"Loaded saved logical-slot layout from {self._plan_store.path}."
+                "Loaded the shared logical-slot layout."
             )
             self._calculate()
         else:
             self._selection_changed()
         self._show_saved_plan_readiness()
+
+    def current_pairs(self) -> tuple[tuple[int, int], ...] | None:
+        if self._current_estimate is None:
+            return None
+        return tuple(
+            (pair.first.slot, pair.second.slot) for pair in self._current_estimate.pairs
+        )
+
+    def simulated_failed_slots(self) -> frozenset[int]:
+        return frozenset(
+            slot
+            for slot, checkbox in self._failure_checkboxes.items()
+            if checkbox.isChecked()
+        )
 
     def _selected_drives(self) -> list[PlannerDrive]:
         return [
@@ -470,6 +519,12 @@ class Raid10PlannerDialog(QDialog):
             QMessageBox.warning(self, "Could not save RAID10 plan", str(error))
             return
         self._show_saved_plan_readiness()
+        self.plan_saved.emit(self._saved_plan)
+        self.diagnostic.emit(
+            "Saved plan",
+            f"Saved {len(pairs)} mirror pair(s) to {self._plan_store.path}; "
+            f"{self._readiness_status.text()}",
+        )
         QMessageBox.information(
             self,
             "RAID10 plan saved",
@@ -561,6 +616,8 @@ class Raid10PlannerDialog(QDialog):
             for slot, checkbox in self._failure_checkboxes.items()
             if checkbox.isChecked()
         }
+        previous_failures.update(self._initial_failed_slots)
+        self._initial_failed_slots = frozenset()
         self._current_estimate = estimate
         self._clear_failure_controls()
         selected_slots = sorted(

@@ -105,6 +105,22 @@ be tolerated. Simulation never changes a disk or creates a RAID array.
 The saved plan is only a logical-slot planning record. Saving, validating, or
 exporting it never issues disk-management commands and never writes to USB media.
 
+## Version 0.5.1 UI organization
+
+- Reorganizes the application into Overview, Benchmarks, RAID10 Planner, Failure
+  Simulator, and Logs / Details tabs
+- Keeps hardware inventory and qualification concise on the Overview tab
+- Moves benchmark results, timestamps, progress, cancellation, and controls into
+  a dedicated Benchmarks tab without changing benchmark safety behavior
+- Separates planning and failure simulation visually while retaining one shared
+  RAID estimate and simulated-failure state
+- Records meaningful hot-plug, reconciliation, slot, benchmark, saved-plan, and
+  validation events without logging unchanged periodic scans
+
+Version 0.5.1 changes GUI organization only. Storage discovery, slot identity,
+benchmarking, RAID calculations, optimization, failure rules, persistence,
+readiness validation, and all disk behavior are unchanged.
+
 Qualification defaults:
 
 - `UNSTABLE`: write-sample coefficient of variation is at least 0.50
