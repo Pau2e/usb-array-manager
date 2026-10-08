@@ -121,6 +121,21 @@ Version 0.5.1 changes GUI organization only. Storage discovery, slot identity,
 benchmarking, RAID calculations, optimization, failure rules, persistence,
 readiness validation, and all disk behavior are unchanged.
 
+## Version 0.5.2 UI polish
+
+- Displays saved benchmark timestamps in readable local time with the local
+  timezone instead of raw ISO strings
+- Shortens long identity values in the Overview table while preserving complete
+  serial, storage, container, USB, and PnP identity details in the tooltip
+- Makes RAID10 drive selection and pairing controls more compact and removes
+  unnecessary vertical expansion
+- Verifies the populated interface at 1280×720 and 1366×768 while preserving the
+  shared Planner/Failure Simulator state
+
+Version 0.5.2 is presentation-only. It does not change device discovery, slot
+identity, benchmarking, RAID calculations, optimization, failure simulation,
+plan persistence, readiness validation, or disk behavior.
+
 Qualification defaults:
 
 - `UNSTABLE`: write-sample coefficient of variation is at least 0.50

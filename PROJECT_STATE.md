@@ -2,11 +2,10 @@
 
 ## Current version
 
-**v0.5.1**
+**v0.5.2**
 
-The current `main` checkpoint is commit `6897217` (`Revert "Polish timestamps
-identities and planner spacing"`). It restores the initial v0.5.1 tabbed UI from
-commit `9bc53e9`; all 51 unit tests pass.
+The current work builds on the v0.5.1 checkpoint and applies the v0.5.2
+presentation-only polish. All 51 unit tests pass.
 
 ## Project purpose
 
@@ -162,6 +161,16 @@ and do not touch disks.
   validation events without logging unchanged periodic scans.
 - Keeps the window usable at a 1050 × 650 minimum size and preserves all v0.5
   service, safety, persistence, readiness, and calculation behavior.
+
+### v0.5.2 — Final UI polish
+
+- Formats benchmark timestamps as readable local date/time values with timezone.
+- Shortens identity text in the Overview table and exposes complete identity
+  fields through tooltips.
+- Compacts RAID10 drive selection and pairing controls to remove unused vertical
+  space.
+- Verifies populated layouts at 1280 × 720 and 1366 × 768.
+- Preserves the single shared Planner/Failure Simulator plan and failure state.
 
 ## Important design decisions
 

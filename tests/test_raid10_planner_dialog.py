@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QSizePolicy
 
 from usb_array_manager.models.benchmark_result import BenchmarkResult
 from usb_array_manager.models.storage_device import StorageDevice
@@ -67,6 +67,11 @@ class Raid10PlannerDialogTests(unittest.TestCase):
         self.assertTrue(
             dialog.windowFlags() & Qt.WindowType.WindowCloseButtonHint
         )
+        self.assertEqual(
+            dialog._selection_group.sizePolicy().verticalPolicy(),
+            QSizePolicy.Policy.Maximum,
+        )
+        self.assertLessEqual(dialog._selection_group.layout().spacing(), 3)
 
         dialog._failure_checkboxes[1].setChecked(True)
         application.processEvents()
