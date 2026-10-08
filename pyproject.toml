@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "usb-array-manager"
-version = "0.4.2"
-description = "USB storage inventory, benchmarking, and read-only RAID10 planning"
+version = "0.5.0"
+description = "USB storage inventory, benchmarking, and persistent read-only RAID10 planning"
 requires-python = ">=3.12"
 dependencies = [
     "PySide6>=6.7,<7",

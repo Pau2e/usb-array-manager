@@ -125,6 +125,27 @@ class SlotStore:
     def reserved_slots(self) -> set[int]:
         return set(self._load_assignments())
 
+    def ambiguous_slots(self, devices: list[StorageDevice]) -> set[int]:
+        """Return reserved slots that have identity evidence but no unique match."""
+        assignments = self._load_assignments()
+        identities = [_identity_from_device(device) for device in devices]
+        matches = _match_assignments(identities, assignments)
+        unmatched_devices = set(range(len(devices))) - set(matches)
+        unmatched_slots = set(assignments) - set(matches.values())
+        ambiguous: set[int] = set()
+        for field in _IDENTITY_MATCH_ORDER:
+            device_values = _group_identity_values(
+                {index: identities[index] for index in unmatched_devices}, field
+            )
+            slot_values = _group_identity_values(
+                {slot: assignments[slot]["identity"] for slot in unmatched_slots},
+                field,
+            )
+            for value in device_values.keys() & slot_values.keys():
+                if len(device_values[value]) != 1 or len(slot_values[value]) != 1:
+                    ambiguous.update(slot_values[value])
+        return ambiguous
+
     def _load_assignments(self) -> dict[int, dict[str, Any]]:
         if not self.path.exists():
             if self._legacy_path is not None and self._legacy_path.exists():

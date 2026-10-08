@@ -87,6 +87,24 @@ estimates use the surviving member's benchmark result. The simulator lists
 working drives, lost redundancy, at-risk pairs, and whether another failure can
 be tolerated. Simulation never changes a disk or creates a RAID array.
 
+## Version 0.5 features
+
+- Save one RAID10 mirror layout by persistent logical slot number in
+  `Documents\USBArrayManager\raid10_plan.json`
+- Reload the saved plan when the application starts and reconcile it with current
+  slot reservations instead of drive letters or physical-disk numbers
+- Report `READY`, `WARNING`, or `NOT READY` with explicit preflight reasons
+- Treat missing mappings, disconnected or ambiguous members, unhealthy Windows
+  status, missing benchmarks, and unstable members as not ready
+- Warn about benchmarks older than 30 days, capacity mismatch, slow members, and
+  unavailable health or capacity information
+- Export a plain-text, read-only plan and readiness summary for documentation
+- Preserve the existing rule that a slot reassignment removes that slot's saved
+  benchmark, making the plan not ready until the new member is tested
+
+The saved plan is only a logical-slot planning record. Saving, validating, or
+exporting it never issues disk-management commands and never writes to USB media.
+
 Qualification defaults:
 
 - `UNSTABLE`: write-sample coefficient of variation is at least 0.50

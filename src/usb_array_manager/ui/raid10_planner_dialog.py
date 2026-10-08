@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from html import escape
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -24,7 +28,12 @@ from PySide6.QtWidgets import (
 from usb_array_manager.models.benchmark_result import BenchmarkResult
 from usb_array_manager.models.raid_failure import Raid10FailureSimulation
 from usb_array_manager.models.raid_plan import PlannerDrive, Raid10Estimate
+from usb_array_manager.models.saved_raid10_plan import SavedRaid10Plan
 from usb_array_manager.models.storage_device import StorageDevice
+from usb_array_manager.services.raid10_plan_store import (
+    Raid10PlanStore,
+    Raid10PlanStoreError,
+)
 from usb_array_manager.services.raid10_planner import (
     Raid10PlanError,
     estimate_raid10,
@@ -36,6 +45,12 @@ from usb_array_manager.services.raid10_failure_simulator import (
     FailureSimulationError,
     simulate_failures,
 )
+from usb_array_manager.services.raid10_readiness import (
+    NOT_READY,
+    READY,
+    readiness_summary,
+    validate_raid10_readiness,
+)
 
 
 class Raid10PlannerDialog(QDialog):
@@ -44,6 +59,10 @@ class Raid10PlannerDialog(QDialog):
         devices: tuple[StorageDevice, ...],
         benchmark_results: dict[int, BenchmarkResult],
         parent: QWidget | None = None,
+        *,
+        plan_store: Raid10PlanStore | None = None,
+        saved_plan: SavedRaid10Plan | None = None,
+        ambiguous_slots: set[int] | frozenset[int] = frozenset(),
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("RAID10 Array Planner — simulation only")
@@ -53,6 +72,11 @@ class Raid10PlannerDialog(QDialog):
         self.setMinimumSize(1_100, 650)
         self.resize(1_500, 800)
         self._drives = _planner_drives(devices, benchmark_results)
+        self._devices = devices
+        self._benchmark_results = benchmark_results
+        self._plan_store = plan_store or Raid10PlanStore()
+        self._saved_plan = saved_plan
+        self._ambiguous_slots = frozenset(ambiguous_slots)
         self._checkboxes: dict[int, QCheckBox] = {}
         self._pair_combos: list[tuple[QComboBox, QComboBox]] = []
         self._current_estimate: Raid10Estimate | None = None
@@ -80,8 +104,10 @@ class Raid10PlannerDialog(QDialog):
                 f"Slot {slot} — {drive.model} — {_capacity(drive.capacity_bytes)} "
                 f"— {state} — {benchmark}"
             )
+            checkbox.setChecked(
+                slot in saved_plan.slots if saved_plan is not None else drive.is_connected
+            )
             checkbox.setEnabled(drive.is_connected)
-            checkbox.setChecked(drive.is_connected)
             checkbox.stateChanged.connect(self._selection_changed)
             self._checkboxes[slot] = checkbox
             selection_layout.addWidget(checkbox)
@@ -150,6 +176,25 @@ class Raid10PlannerDialog(QDialog):
         self._array_summary.setTextFormat(Qt.TextFormat.RichText)
         self._array_summary.setWordWrap(True)
         result_layout.addWidget(self._array_summary)
+
+        plan_actions = QHBoxLayout()
+        self._save_plan_button = QPushButton("Save this plan")
+        self._save_plan_button.clicked.connect(self._save_plan)
+        self._export_plan_button = QPushButton("Export summary…")
+        self._export_plan_button.clicked.connect(self._export_summary)
+        plan_actions.addStretch(1)
+        plan_actions.addWidget(self._save_plan_button)
+        plan_actions.addWidget(self._export_plan_button)
+        result_layout.addLayout(plan_actions)
+
+        readiness_group = QGroupBox("Saved-plan readiness")
+        readiness_layout = QVBoxLayout(readiness_group)
+        self._readiness_status = QLabel("No saved RAID10 plan.")
+        self._readiness_status.setWordWrap(True)
+        self._readiness_details = QTextBrowser()
+        self._readiness_details.setMaximumHeight(130)
+        readiness_layout.addWidget(self._readiness_status)
+        readiness_layout.addWidget(self._readiness_details)
 
         failure_group = QGroupBox("4. RAID10 failure and degraded-mode simulator")
         failure_layout = QVBoxLayout(failure_group)
@@ -229,6 +274,7 @@ class Raid10PlannerDialog(QDialog):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addWidget(failure_group, 1)
         right_layout.addWidget(warnings_group)
+        right_layout.addWidget(readiness_group)
         right_layout.addWidget(model_group)
 
         self._content_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -244,7 +290,23 @@ class Raid10PlannerDialog(QDialog):
         layout.addWidget(self._content_splitter, 1)
         layout.addWidget(buttons)
 
-        self._selection_changed()
+        if saved_plan is not None and all(slot in self._drives for slot in saved_plan.slots):
+            pairs = [
+                (self._drives[first], self._drives[second])
+                for first, second in saved_plan.pairs
+            ]
+            self._selection_status.setText(
+                f"Loaded saved plan: {len(saved_plan.slots)} drive(s), "
+                f"{len(saved_plan.pairs)} mirror pair(s)."
+            )
+            self._rebuild_pair_rows(pairs)
+            self._suggestion_reason.setText(
+                f"Loaded saved logical-slot layout from {self._plan_store.path}."
+            )
+            self._calculate()
+        else:
+            self._selection_changed()
+        self._show_saved_plan_readiness()
 
     def _selected_drives(self) -> list[PlannerDrive]:
         return [
@@ -390,6 +452,101 @@ class Raid10PlannerDialog(QDialog):
             else "No planner warnings for the selected layout."
         )
         self._set_failure_estimate(estimate)
+
+    def _save_plan(self) -> None:
+        if self._current_estimate is None:
+            QMessageBox.warning(
+                self,
+                "No valid plan",
+                "Calculate a valid mirror layout before saving it.",
+            )
+            return
+        pairs = tuple(
+            (pair.first.slot, pair.second.slot) for pair in self._current_estimate.pairs
+        )
+        try:
+            self._saved_plan = self._plan_store.save(pairs)
+        except (Raid10PlanStoreError, ValueError) as error:
+            QMessageBox.warning(self, "Could not save RAID10 plan", str(error))
+            return
+        self._show_saved_plan_readiness()
+        QMessageBox.information(
+            self,
+            "RAID10 plan saved",
+            "The logical-slot layout was saved locally. No USB drive was changed.\n\n"
+            f"{self._plan_store.path}",
+        )
+
+    def _show_saved_plan_readiness(self) -> None:
+        if self._saved_plan is None:
+            self._readiness_status.setStyleSheet("")
+            self._readiness_status.setText("No saved RAID10 plan.")
+            self._readiness_details.setText(
+                "Save a calculated layout to run the persistent preflight checks."
+            )
+            self._export_plan_button.setEnabled(False)
+            return
+        readiness = validate_raid10_readiness(
+            self._saved_plan,
+            self._devices,
+            self._benchmark_results,
+            ambiguous_slots=self._ambiguous_slots,
+        )
+        color = "#137333" if readiness.status == READY else "#9a6700"
+        if readiness.status == NOT_READY:
+            color = "#b00020"
+        self._readiness_status.setStyleSheet(
+            f"color: {color}; font-size: 15px; font-weight: 700;"
+        )
+        self._readiness_status.setText(
+            f"Saved RAID10 plan: {readiness.status} — benchmark freshness: 30 days"
+        )
+        if readiness.issues:
+            self._readiness_details.setHtml(
+                "<ul>"
+                + "".join(
+                    f"<li><b>{escape(issue.severity)}:</b> "
+                    f"{escape(issue.message)}</li>"
+                    for issue in readiness.issues
+                )
+                + "</ul>"
+            )
+        else:
+            self._readiness_details.setText(
+                "All strict preflight checks passed for the saved logical-slot layout."
+            )
+        self._export_plan_button.setEnabled(True)
+
+    def _export_summary(self) -> None:
+        if self._saved_plan is None:
+            return
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export read-only RAID10 plan summary",
+            str(self._plan_store.path.with_name("raid10_plan_summary.txt")),
+            "Text files (*.txt);;All files (*)",
+        )
+        if not path:
+            return
+        readiness = validate_raid10_readiness(
+            self._saved_plan,
+            self._devices,
+            self._benchmark_results,
+            ambiguous_slots=self._ambiguous_slots,
+        )
+        try:
+            Path(path).write_text(
+                readiness_summary(self._saved_plan, readiness),
+                encoding="utf-8",
+            )
+        except OSError as error:
+            QMessageBox.warning(self, "Could not export plan summary", str(error))
+            return
+        QMessageBox.information(
+            self,
+            "Plan summary exported",
+            f"Saved read-only documentation to:\n{path}",
+        )
 
     def _clear_results(self) -> None:
         self._pair_table.setRowCount(0)

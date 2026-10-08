@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from usb_array_manager.models.storage_device import StorageDevice
 from usb_array_manager.models.benchmark_result import BenchmarkResult
+from usb_array_manager.models.saved_raid10_plan import SavedRaid10Plan
 from usb_array_manager.services.benchmark import (
     BenchmarkCancelled,
     BenchmarkError,
@@ -37,6 +38,10 @@ from usb_array_manager.services.benchmark_store import (
     BenchmarkStoreError,
 )
 from usb_array_manager.services.device_monitor import WindowsDeviceEventFilter
+from usb_array_manager.services.raid10_plan_store import (
+    Raid10PlanStore,
+    Raid10PlanStoreError,
+)
 from usb_array_manager.services.slot_store import (
     SLOT_COUNT,
     SlotConflictError,
@@ -127,6 +132,8 @@ class MainWindow(QMainWindow):
         self._connected_devices: list[StorageDevice] = []
         self._slot_store = SlotStore()
         self._benchmark_store = BenchmarkStore()
+        self._raid10_plan_store = Raid10PlanStore()
+        self._saved_raid10_plan: SavedRaid10Plan | None = None
         self._benchmark_settings = BenchmarkSettings()
         self._benchmark_results: dict[int, BenchmarkResult] = {}
         self._benchmark_buttons: list[QPushButton] = []
@@ -198,6 +205,13 @@ class MainWindow(QMainWindow):
             self._status.setText("Saved benchmark results could not be loaded.")
             self._status.setToolTip(str(error))
         self._model.set_benchmark_results(self._benchmark_results)
+
+        try:
+            self._saved_raid10_plan = self._raid10_plan_store.load()
+        except Raid10PlanStoreError as error:
+            self._status.setStyleSheet("color: #b00020;")
+            self._status.setText("Saved RAID10 plan could not be loaded.")
+            self._status.setToolTip(str(error))
 
         self._device_change_timer = QTimer(self)
         self._device_change_timer.setSingleShot(True)
@@ -387,12 +401,26 @@ class MainWindow(QMainWindow):
             self._benchmark_buttons.append(button)
 
     def _open_raid10_planner(self) -> None:
+        try:
+            ambiguous_slots = self._slot_store.ambiguous_slots(
+                self._connected_devices
+            )
+        except SlotStoreError as error:
+            QMessageBox.warning(self, "Slot configuration error", str(error))
+            ambiguous_slots = set()
         dialog = Raid10PlannerDialog(
             self._model.devices(),
             self._benchmark_results,
             self,
+            plan_store=self._raid10_plan_store,
+            saved_plan=self._saved_raid10_plan,
+            ambiguous_slots=ambiguous_slots,
         )
         dialog.exec()
+        try:
+            self._saved_raid10_plan = self._raid10_plan_store.load()
+        except Raid10PlanStoreError as error:
+            QMessageBox.warning(self, "Saved RAID10 plan error", str(error))
 
     def _start_benchmark(self, device: StorageDevice) -> None:
         if self._benchmark_thread is not None or device.slot is None:

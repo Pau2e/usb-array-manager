@@ -124,6 +124,31 @@ class SlotStoreTests(unittest.TestCase):
         self.assertEqual(slots_by_location["PORT-1"], 1)
         self.assertEqual(slots_by_location["PORT-2"], 2)
 
+    def test_ambiguous_reserved_slots_are_reported(self) -> None:
+        first = make_device(
+            container_id=None,
+            usb_device_id=None,
+            pnp_device_id=None,
+            location="PORT-1",
+        )
+        second = make_device(
+            container_id=None,
+            usb_device_id=None,
+            pnp_device_id=None,
+            location="PORT-2",
+            drive_letter="J:",
+            device_path=r"\\.\PHYSICALDRIVE5",
+        )
+        store = SlotStore(self.config_path)
+        store.assign(first, 1)
+        store.assign(second, 2)
+        ambiguous_devices = [
+            replace(first, location_paths=("CHANGED-PORT",)),
+            replace(second, location_paths=("CHANGED-PORT",)),
+        ]
+
+        self.assertEqual(store.ambiguous_slots(ambiguous_devices), {1, 2})
+
     def test_cannot_assign_two_devices_to_one_slot(self) -> None:
         store = SlotStore(self.config_path)
         store.assign(make_device(), 1)

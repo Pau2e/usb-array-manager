@@ -1,10 +1,13 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from usb_array_manager.models.benchmark_result import BenchmarkResult
 from usb_array_manager.models.storage_device import StorageDevice
+from usb_array_manager.services.raid10_plan_store import Raid10PlanStore
 from usb_array_manager.ui.raid10_planner_dialog import Raid10PlannerDialog
 
 
@@ -78,6 +81,33 @@ class Raid10PlannerDialogTests(unittest.TestCase):
         self.assertIn("HEALTHY", dialog._array_health.text())
         self.assertFalse(any(dialog._failure_checkboxes[slot].isChecked() for slot in range(1, 5)))
         dialog.close()
+
+    def test_saved_plan_layout_is_reloaded_and_checked(self) -> None:
+        application = QApplication.instance() or QApplication([])
+        devices = tuple(device(slot) for slot in range(1, 5))
+        results = {slot: result(slot) for slot in range(1, 5)}
+        with tempfile.TemporaryDirectory() as directory:
+            store = Raid10PlanStore(Path(directory) / "raid10_plan.json")
+            saved_plan = store.save(
+                ((1, 4), (2, 3)),
+                saved_at="2026-10-08T00:00:00+00:00",
+            )
+            dialog = Raid10PlannerDialog(
+                devices,
+                results,
+                plan_store=store,
+                saved_plan=saved_plan,
+            )
+            application.processEvents()
+
+            loaded_pairs = tuple(
+                (first.currentData(), second.currentData())
+                for first, second in dialog._pair_combos
+            )
+            self.assertEqual(loaded_pairs, ((1, 4), (2, 3)))
+            self.assertIn("Saved RAID10 plan:", dialog._readiness_status.text())
+            self.assertTrue(dialog._export_plan_button.isEnabled())
+            dialog.close()
 
 
 if __name__ == "__main__":
