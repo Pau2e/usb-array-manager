@@ -41,7 +41,7 @@ class OverviewTab(QWidget):
         self.model = OverviewTableModel()
         self.table = _configured_table(self.model)
         self.table.setColumnWidth(1, 190)
-        self.table.setColumnWidth(2, 215)
+        self.table.setColumnWidth(2, 250)
         self.table.setColumnWidth(5, 155)
         self.status = QLabel("Waiting for the first scan…")
         self.status.setWordWrap(True)

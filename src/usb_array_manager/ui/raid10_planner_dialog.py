@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QSizePolicy,
     QSplitter,
     QTabWidget,
     QTableWidget,
@@ -100,14 +99,7 @@ class Raid10PlannerDialog(QDialog):
         safety.setStyleSheet("color: #b00020; font-weight: 600;")
 
         selection_group = QGroupBox("1. Select an even number of connected slots")
-        self._selection_group = selection_group
-        selection_group.setSizePolicy(
-            QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Maximum,
-        )
         selection_layout = QVBoxLayout(selection_group)
-        selection_layout.setContentsMargins(10, 8, 10, 8)
-        selection_layout.setSpacing(3)
         for slot in sorted(self._drives):
             drive = self._drives[slot]
             state = "Connected" if drive.is_connected else "Disconnected"
@@ -128,10 +120,6 @@ class Raid10PlannerDialog(QDialog):
             checkbox.setChecked(slot in initial_slots if initial_slots else drive.is_connected)
             checkbox.setEnabled(drive.is_connected)
             checkbox.stateChanged.connect(self._selection_changed)
-            checkbox.setSizePolicy(
-                QSizePolicy.Policy.Preferred,
-                QSizePolicy.Policy.Fixed,
-            )
             self._checkboxes[slot] = checkbox
             selection_layout.addWidget(checkbox)
 
@@ -147,10 +135,6 @@ class Raid10PlannerDialog(QDialog):
             selection_layout.addWidget(note)
 
         pair_group = QGroupBox("2. Define mirror pairs")
-        pair_group.setSizePolicy(
-            QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Maximum,
-        )
         pair_layout = QVBoxLayout(pair_group)
         pair_actions = QHBoxLayout()
         self._selection_status = QLabel()
@@ -291,7 +275,6 @@ class Raid10PlannerDialog(QDialog):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(selection_group)
         left_layout.addWidget(pair_group)
-        left_layout.addStretch(1)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)

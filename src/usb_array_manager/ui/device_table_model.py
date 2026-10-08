@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 
@@ -167,7 +166,7 @@ def _speed(value: float | None) -> str:
     return f"{value:.1f}" if value is not None else "—"
 
 
-def _compact_identity(device: StorageDevice) -> str:
+def _identity(device: StorageDevice) -> str:
     primary = device.serial_number or "No serial"
     identity = (
         device.storage_unique_id
@@ -175,35 +174,7 @@ def _compact_identity(device: StorageDevice) -> str:
         or device.usb_device_id
         or device.pnp_device_id
     )
-    if not identity or identity == device.serial_number:
-        return primary
-    shortened = identity if len(identity) <= 32 else f"{identity[:29]}…"
-    return f"{primary} · {shortened}"
-
-
-def _full_identity(device: StorageDevice) -> str:
-    fields = (
-        ("Serial", device.serial_number),
-        ("Storage unique ID", device.storage_unique_id),
-        ("Container ID", device.container_id),
-        ("USB device ID", device.usb_device_id),
-        ("PnP device ID", device.pnp_device_id),
-    )
-    available = [f"{label}: {value}" for label, value in fields if value]
-    return "\n".join(available) or "No persistent identity information available."
-
-
-def _local_timestamp(value: str | None) -> str:
-    if not value:
-        return "Never"
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        parsed = parsed.astimezone()
-    except ValueError:
-        return value
-    timezone_name = parsed.tzname()
-    suffix = f" {timezone_name}" if timezone_name else ""
-    return parsed.strftime("%Y-%m-%d %H:%M") + suffix
+    return f"{primary} · {identity}" if identity else primary
 
 
 class _FocusedDeviceTableModel(QAbstractTableModel):
@@ -292,7 +263,7 @@ class OverviewTableModel(_FocusedDeviceTableModel):
             values = (
                 f"Slot {device.slot}" if device.slot is not None else "Unassigned",
                 _text(device.model),
-                _compact_identity(device),
+                _identity(device),
                 _format_capacity(device.capacity_bytes),
                 ", ".join(device.drive_letters) or "None",
                 _text(device.device_path),
@@ -303,8 +274,6 @@ class OverviewTableModel(_FocusedDeviceTableModel):
                 result.qualification if result else "NOT TESTED",
             )
             return values[index.column()]
-        if role == Qt.ItemDataRole.ToolTipRole and index.column() == 2:
-            return _full_identity(self._devices[index.row()])
         if role == Qt.ItemDataRole.TextAlignmentRole:
             if index.column() in (1, 2, 5):
                 return Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
@@ -337,7 +306,7 @@ class BenchmarkTableModel(_FocusedDeviceTableModel):
                 _speed(result.sequential_write_mbps if result else None),
                 _speed(result.sustained_write_mbps if result else None),
                 result.qualification if result else "NOT TESTED",
-                _local_timestamp(result.tested_at if result else None),
+                result.tested_at if result else "Never",
                 "",
             )
             return values[index.column()]
