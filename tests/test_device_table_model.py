@@ -131,12 +131,19 @@ class DeviceTableModelTests(unittest.TestCase):
             overview.headerData(2, Qt.Orientation.Horizontal), "Serial / identity"
         )
         self.assertEqual(overview.data(overview.index(0, 10)), "GOOD")
+        self.assertIn(
+            r"USBSTOR\DISK&VEN_EXAMPLE",
+            overview.data(
+                overview.index(0, 2),
+                Qt.ItemDataRole.ToolTipRole,
+            ),
+        )
         self.assertEqual(benchmarks.columnCount(), 8)
         self.assertEqual(benchmarks.data(benchmarks.index(0, 4)), "35.8")
-        self.assertEqual(
-            benchmarks.data(benchmarks.index(0, 6)),
-            "2026-10-09T00:00:00+00:00",
-        )
+        displayed_timestamp = benchmarks.data(benchmarks.index(0, 6))
+        self.assertNotIn("2026-10-09T", displayed_timestamp)
+        self.assertNotIn("+00:00", displayed_timestamp)
+        self.assertRegex(displayed_timestamp, r"^2026-10-0[89] \d{2}:\d{2}")
 
 
 if __name__ == "__main__":
