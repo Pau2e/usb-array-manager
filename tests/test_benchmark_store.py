@@ -30,6 +30,23 @@ class BenchmarkStoreTests(unittest.TestCase):
             BenchmarkStore(path).remove_slots(4)
             self.assertEqual(BenchmarkStore(path).load_all(), {})
 
+    def test_old_cached_results_are_not_displayed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "benchmark_results.json"
+            path.write_text(
+                '{"schema_version": 1, "results": {"1": {'
+                '"slot": 1, "tested_at": "old", "drive_letter": "J:", '
+                '"file_size_bytes": 1073741824, '
+                '"sequential_read_mbps": 1715.5, '
+                '"sequential_write_mbps": 57.3, '
+                '"burst_write_mbps": 45.9, '
+                '"sustained_write_mbps": 58.3, '
+                '"write_stability_cv": 0.07, "qualification": "GOOD"}}}',
+                encoding="utf-8",
+            )
+
+            self.assertEqual(BenchmarkStore(path).load_all(), {})
+
 
 if __name__ == "__main__":
     unittest.main()

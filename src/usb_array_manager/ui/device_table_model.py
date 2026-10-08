@@ -158,6 +158,9 @@ class DeviceTableModel(QAbstractTableModel):
             return self._devices[row]
         return None
 
+    def devices(self) -> tuple[StorageDevice, ...]:
+        return tuple(self._devices)
+
 
 def _speed(value: float | None) -> str:
     return f"{value:.1f}" if value is not None else "—"

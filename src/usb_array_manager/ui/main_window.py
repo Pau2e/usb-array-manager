@@ -48,6 +48,7 @@ from usb_array_manager.services.windows_cim import (
     detect_usb_storage_devices,
 )
 from usb_array_manager.ui.device_table_model import DeviceTableModel
+from usb_array_manager.ui.raid10_planner_dialog import Raid10PlannerDialog
 
 
 class DeviceScanThread(QThread):
@@ -130,7 +131,7 @@ class MainWindow(QMainWindow):
         self._benchmark_results: dict[int, BenchmarkResult] = {}
         self._benchmark_buttons: list[QPushButton] = []
 
-        self.setWindowTitle("USB Array Manager — Device inventory and benchmark")
+        self.setWindowTitle("USB Array Manager — Inventory, benchmark, and RAID10 planner")
         self.resize(1_560, 500)
 
         self._model = DeviceTableModel()
@@ -166,6 +167,8 @@ class MainWindow(QMainWindow):
         self._assign_slot_button = QPushButton("Assign/change slot…")
         self._assign_slot_button.setEnabled(False)
         self._assign_slot_button.clicked.connect(self._assign_selected_slot)
+        self._raid10_button = QPushButton("Plan RAID10…")
+        self._raid10_button.clicked.connect(self._open_raid10_planner)
         self._table.selectionModel().selectionChanged.connect(
             self._update_slot_button
         )
@@ -174,6 +177,7 @@ class MainWindow(QMainWindow):
         status_row.addWidget(self._status, 1)
         status_row.addWidget(self._progress)
         status_row.addWidget(self._cancel_benchmark_button)
+        status_row.addWidget(self._raid10_button)
         status_row.addWidget(self._assign_slot_button)
         status_row.addWidget(self._refresh_button)
 
@@ -381,6 +385,14 @@ class MainWindow(QMainWindow):
             )
             self._table.setIndexWidget(self._model.index(row, action_column), button)
             self._benchmark_buttons.append(button)
+
+    def _open_raid10_planner(self) -> None:
+        dialog = Raid10PlannerDialog(
+            self._model.devices(),
+            self._benchmark_results,
+            self,
+        )
+        dialog.exec()
 
     def _start_benchmark(self, device: StorageDevice) -> None:
         if self._benchmark_thread is not None or device.slot is None:

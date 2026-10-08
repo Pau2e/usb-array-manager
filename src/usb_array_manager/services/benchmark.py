@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import random
 import shutil
 import statistics
@@ -13,6 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from usb_array_manager.models.benchmark_result import BenchmarkResult
+from usb_array_manager.services.windows_unbuffered_io import (
+    AlignedBuffer,
+    UnbufferedFile,
+    UnbufferedIOError,
+    get_sector_size,
+)
 
 
 MEBIBYTE = 1024 * 1024
@@ -88,6 +93,7 @@ def run_benchmark(
 ) -> BenchmarkResult:
     active_settings = settings or BenchmarkSettings()
     check_benchmark_target(root, active_settings)
+    _validate_alignment(root, active_settings, include_random_4k)
     cancel = cancel_event or threading.Event()
     report = progress or (lambda _percent, _message: None)
 
@@ -174,28 +180,29 @@ def _sequential_write(
     report: ProgressCallback,
     cancel: threading.Event,
 ) -> _WriteMetrics:
-    data = os.urandom(min(settings.block_size_bytes, settings.file_size_bytes))
     total_written = 0
     sample_written = 0
     samples: list[float] = []
-    start = time.perf_counter()
-    sample_start = start
     burst_elapsed: float | None = None
 
     report(0, "Writing temporary benchmark file")
-    with path.open("xb", buffering=0) as file:
+    with (
+        AlignedBuffer(settings.block_size_bytes, fill_random=True) as buffer,
+        UnbufferedFile.create_for_sequential_write(path) as file,
+    ):
+        start = time.perf_counter()
+        sample_start = start
         while total_written < settings.file_size_bytes:
             _raise_if_cancelled(cancel)
-            amount = min(len(data), settings.file_size_bytes - total_written)
-            written = file.write(data[:amount])
-            if written != amount:
-                raise BenchmarkError("Windows reported a partial benchmark write.")
-            total_written += written
-            sample_written += written
+            amount = min(
+                settings.block_size_bytes,
+                settings.file_size_bytes - total_written,
+            )
+            file.write(buffer, amount)
+            total_written += amount
+            sample_written += amount
 
             if burst_elapsed is None and total_written >= settings.burst_size_bytes:
-                file.flush()
-                os.fsync(file.fileno())
                 burst_elapsed = time.perf_counter() - start
 
             sample_complete = (
@@ -203,8 +210,6 @@ def _sequential_write(
                 or total_written == settings.file_size_bytes
             )
             if sample_complete:
-                file.flush()
-                os.fsync(file.fileno())
                 now = time.perf_counter()
                 elapsed = max(now - sample_start, 1e-9)
                 if total_written > settings.burst_size_bytes:
@@ -214,7 +219,9 @@ def _sequential_write(
                 percent = int((total_written / settings.file_size_bytes) * 55)
                 report(percent, "Measuring sequential and sustained write speed")
 
-    total_elapsed = max(time.perf_counter() - start, 1e-9)
+        file.flush()
+        total_elapsed = max(time.perf_counter() - start, 1e-9)
+
     burst_elapsed = burst_elapsed or total_elapsed
     burst_bytes = min(settings.burst_size_bytes, settings.file_size_bytes)
     sustained_bytes = settings.file_size_bytes - burst_bytes
@@ -236,21 +243,25 @@ def _sequential_read(
     cancel: threading.Event,
 ) -> float:
     total_read = 0
-    start = time.perf_counter()
     report(55, "Reading temporary benchmark file")
-    with path.open("rb", buffering=0) as file:
-        while True:
+    with (
+        AlignedBuffer(settings.block_size_bytes) as buffer,
+        UnbufferedFile.open_for_sequential_read(path) as file,
+    ):
+        start = time.perf_counter()
+        while total_read < settings.file_size_bytes:
             _raise_if_cancelled(cancel)
-            data = file.read(settings.block_size_bytes)
-            if not data:
-                break
-            total_read += len(data)
+            amount = min(
+                settings.block_size_bytes,
+                settings.file_size_bytes - total_read,
+            )
+            file.read(buffer, amount)
+            total_read += amount
             percent = 55 + int((total_read / settings.file_size_bytes) * 35)
             report(min(percent, 90), "Measuring sequential read speed")
+        elapsed = max(time.perf_counter() - start, 1e-9)
 
-    if total_read != settings.file_size_bytes:
-        raise BenchmarkError("The temporary benchmark file could not be read completely.")
-    return _mbps(total_read, max(time.perf_counter() - start, 1e-9))
+    return _mbps(total_read, elapsed)
 
 
 def _random_4k(
@@ -267,32 +278,59 @@ def _random_4k(
     block_count = settings.file_size_bytes // block_size
     generator = random.Random(0)
     offsets = [generator.randrange(block_count) * block_size for _ in range(operation_count)]
-    data = os.urandom(block_size)
-
-    report(90, "Running optional random 4K write test")
-    write_start = time.perf_counter()
-    with path.open("r+b", buffering=0) as file:
+    with (
+        AlignedBuffer(block_size, fill_random=True) as buffer,
+        UnbufferedFile.open_for_random_access(path) as file,
+    ):
+        report(90, "Running optional random 4K write test")
+        write_start = time.perf_counter()
         for index, offset in enumerate(offsets):
             _raise_if_cancelled(cancel)
             file.seek(offset)
-            if file.write(data) != block_size:
-                raise BenchmarkError("Windows reported a partial random 4K write.")
+            file.write(buffer, block_size)
             report(90 + int(((index + 1) / operation_count) * 5), "Random 4K write")
         file.flush()
-        os.fsync(file.fileno())
-    write_iops = operation_count / max(time.perf_counter() - write_start, 1e-9)
+        write_iops = operation_count / max(
+            time.perf_counter() - write_start, 1e-9
+        )
 
-    report(95, "Running optional random 4K read test")
-    read_start = time.perf_counter()
-    with path.open("rb", buffering=0) as file:
+        report(95, "Running optional random 4K read test")
+        read_start = time.perf_counter()
         for index, offset in enumerate(reversed(offsets)):
             _raise_if_cancelled(cancel)
             file.seek(offset)
-            if len(file.read(block_size)) != block_size:
-                raise BenchmarkError("The random 4K read was incomplete.")
+            file.read(buffer, block_size)
             report(95 + int(((index + 1) / operation_count) * 5), "Random 4K read")
-    read_iops = operation_count / max(time.perf_counter() - read_start, 1e-9)
+        read_iops = operation_count / max(
+            time.perf_counter() - read_start, 1e-9
+        )
     return read_iops, write_iops
+
+
+def _validate_alignment(
+    root: Path,
+    settings: BenchmarkSettings,
+    include_random_4k: bool,
+) -> None:
+    try:
+        sector_size = get_sector_size(root)
+    except UnbufferedIOError as error:
+        raise BenchmarkSafetyError(str(error)) from error
+
+    sizes = (
+        settings.file_size_bytes,
+        settings.block_size_bytes,
+        settings.sample_size_bytes,
+        settings.burst_size_bytes,
+    )
+    if any(size % sector_size for size in sizes):
+        raise BenchmarkSafetyError(
+            f"Benchmark sizes must align to the drive's {sector_size}-byte sector size."
+        )
+    if include_random_4k and 4096 % sector_size:
+        raise BenchmarkSafetyError(
+            f"Random 4K testing is unavailable with {sector_size}-byte sectors."
+        )
 
 
 def qualify_result(

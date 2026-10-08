@@ -33,11 +33,14 @@ class BenchmarkStore:
             raw_results = data.get("results")
             if not isinstance(raw_results, dict):
                 raise ValueError("missing results")
-            return {
-                int(slot): BenchmarkResult.from_dict(result)
-                for slot, result in raw_results.items()
-                if isinstance(result, dict)
-            }
+            results: dict[int, BenchmarkResult] = {}
+            for slot, raw_result in raw_results.items():
+                if not isinstance(raw_result, dict):
+                    continue
+                result = BenchmarkResult.from_dict(raw_result)
+                if result.measurement_method_version == 2:
+                    results[int(slot)] = result
+            return results
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
             raise BenchmarkStoreError(
                 f"Could not read benchmark results: {self.path}"

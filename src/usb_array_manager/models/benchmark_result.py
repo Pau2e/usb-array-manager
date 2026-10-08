@@ -16,6 +16,7 @@ class BenchmarkResult:
     sustained_write_mbps: float
     write_stability_cv: float
     qualification: str
+    measurement_method_version: int = 2
     random_4k_read_iops: float | None = None
     random_4k_write_iops: float | None = None
 
@@ -35,6 +36,9 @@ class BenchmarkResult:
             sustained_write_mbps=float(data["sustained_write_mbps"]),
             write_stability_cv=float(data["write_stability_cv"]),
             qualification=str(data["qualification"]),
+            measurement_method_version=int(
+                data.get("measurement_method_version", 1)
+            ),
             random_4k_read_iops=(
                 float(data["random_4k_read_iops"])
                 if data.get("random_4k_read_iops") is not None

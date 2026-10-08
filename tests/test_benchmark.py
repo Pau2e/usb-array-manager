@@ -76,6 +76,20 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertEqual(list(self.root.iterdir()), [])
 
+    def test_refuses_transfer_sizes_that_are_not_sector_aligned(self) -> None:
+        misaligned_settings = BenchmarkSettings(
+            file_size_bytes=8192,
+            block_size_bytes=1000,
+            sample_size_bytes=4096,
+            burst_size_bytes=4096,
+            free_space_reserve_bytes=0,
+        )
+
+        with self.assertRaises(BenchmarkSafetyError):
+            run_benchmark(self.root, 1, "T:", settings=misaligned_settings)
+
+        self.assertEqual(list(self.root.iterdir()), [])
+
     def test_qualification_thresholds(self) -> None:
         self.assertEqual(qualify_result(100, 40, 0.1), "GOOD")
         self.assertEqual(qualify_result(100, 10, 0.1), "SLOW WRITE")
