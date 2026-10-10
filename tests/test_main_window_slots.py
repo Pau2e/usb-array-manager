@@ -103,6 +103,7 @@ class MainWindowSlotTests(unittest.TestCase):
                     "Benchmarks",
                     "RAID10 Planner",
                     "Failure Simulator",
+                    "Backend / Deployment",
                     "Logs / Details",
                 ],
             )
@@ -118,6 +119,27 @@ class MainWindowSlotTests(unittest.TestCase):
             application.processEvents()
             self.assertIn("DEGRADED", window._raid10_workspace._array_health.text())
             self.assertIn("Inventory:", window._logs_tab.output.toPlainText())
+            self.assertEqual(
+                window._backend_tab.backend_name.text(),
+                "Backend: Windows Storage Spaces",
+            )
+            self.assertIn(
+                "PREVIEW ONLY — NOT EXECUTED",
+                window._backend_tab.preview.toPlainText(),
+            )
+            saved_plan = window._raid10_plan_store.save(
+                ((1, 2), (3, 4)),
+                saved_at="2026-10-10T10:00:00+00:00",
+            )
+            window._raid_plan_saved(saved_plan)
+            self.assertIn(
+                "Pair A, Slot 1 ->",
+                window._backend_tab.preview.toPlainText(),
+            )
+            self.assertIn(
+                "Backend capability:",
+                window._logs_tab.output.toPlainText(),
+            )
             window.close()
 
 

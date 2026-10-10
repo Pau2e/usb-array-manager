@@ -36,6 +36,7 @@ from usb_array_manager.services.raid10_plan_store import (
     Raid10PlanStore,
     Raid10PlanStoreError,
 )
+from usb_array_manager.services.raid_backend import WindowsStorageSpacesBackend
 from usb_array_manager.services.slot_store import (
     SLOT_COUNT,
     SlotConflictError,
@@ -46,7 +47,12 @@ from usb_array_manager.services.windows_cim import (
     DeviceDetectionError,
     detect_usb_storage_devices,
 )
-from usb_array_manager.ui.device_tabs import BenchmarksTab, LogsTab, OverviewTab
+from usb_array_manager.ui.device_tabs import (
+    BackendDeploymentTab,
+    BenchmarksTab,
+    LogsTab,
+    OverviewTab,
+)
 from usb_array_manager.ui.raid10_planner_dialog import Raid10PlannerDialog
 
 
@@ -134,13 +140,15 @@ class MainWindow(QMainWindow):
         self._raid10_workspace: Raid10PlannerDialog | None = None
         self._last_inventory_signature: tuple | None = None
         self._last_readiness_text: str | None = None
+        self._raid_backend = WindowsStorageSpacesBackend()
 
-        self.setWindowTitle("USB Array Manager 0.5.3 — Read-only planning workspace")
+        self.setWindowTitle("USB Array Manager 0.6 — Read-only deployment planning")
         self.setMinimumSize(1_050, 650)
         self.resize(1_350, 780)
 
         self._overview_tab = OverviewTab()
         self._benchmarks_tab = BenchmarksTab()
+        self._backend_tab = BackendDeploymentTab()
         self._logs_tab = LogsTab()
         self._model = self._overview_tab.model
         self._table = self._overview_tab.table
@@ -181,6 +189,7 @@ class MainWindow(QMainWindow):
         self._tabs.setDocumentMode(True)
         self._tabs.addTab(self._overview_tab, "Overview")
         self._tabs.addTab(self._benchmarks_tab, "Benchmarks")
+        self._tabs.addTab(self._backend_tab, "Backend / Deployment")
         self._tabs.addTab(self._logs_tab, "Logs / Details")
         self.setCentralWidget(self._tabs)
         self._rebuild_raid_workspace(preserve_state=False)
@@ -466,6 +475,13 @@ class MainWindow(QMainWindow):
         self._raid10_workspace = workspace
         self._tabs.insertTab(2, workspace.planner_page, "RAID10 Planner")
         self._tabs.insertTab(3, workspace.failure_page, "Failure Simulator")
+        self._backend_tab.set_assessment(
+            self._raid_backend.assess(
+                self._saved_raid10_plan,
+                self._model.devices(),
+                ambiguous_slots=ambiguous_slots,
+            )
+        )
         if was_planner:
             self._tabs.setCurrentWidget(workspace.planner_page)
         elif was_failure:
@@ -483,6 +499,23 @@ class MainWindow(QMainWindow):
     def _raid_plan_saved(self, plan: SavedRaid10Plan) -> None:
         self._saved_raid10_plan = plan
         self._last_readiness_text = None
+        try:
+            ambiguous_slots = self._slot_store.ambiguous_slots(
+                self._connected_devices
+            )
+        except SlotStoreError as error:
+            ambiguous_slots = set()
+            self._log("Slot reconciliation", str(error))
+        assessment = self._raid_backend.assess(
+            plan,
+            self._model.devices(),
+            ambiguous_slots=ambiguous_slots,
+        )
+        self._backend_tab.set_assessment(assessment)
+        self._log(
+            "Backend capability",
+            f"{assessment.backend_name}: {assessment.status}. {assessment.explanation}",
+        )
 
     def _set_benchmark_results_on_models(self) -> None:
         self._model.set_benchmark_results(self._benchmark_results)

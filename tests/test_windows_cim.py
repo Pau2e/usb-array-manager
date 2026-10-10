@@ -22,6 +22,16 @@ class RecordConversionTests(unittest.TestCase):
                 "storage_unique_id_format": 3,
                 "container_id": "{CONTAINER-123}",
                 "location_paths": ["PCIROOT(0)#USB(1)"],
+                "disk_number": 4,
+                "is_removable": False,
+                "is_boot_disk": False,
+                "is_system_disk": False,
+                "is_read_only": False,
+                "is_offline": False,
+                "partition_count": 1,
+                "partition_style": "GPT",
+                "filesystem_types": ["NTFS"],
+                "operational_status": ["Online"],
             }
         )
 
@@ -40,6 +50,14 @@ class RecordConversionTests(unittest.TestCase):
         self.assertEqual(device.storage_unique_id_format, "3")
         self.assertEqual(device.container_id, "{CONTAINER-123}")
         self.assertEqual(device.location_paths, ("PCIROOT(0)#USB(1)",))
+        self.assertEqual(device.disk_number, 4)
+        self.assertFalse(device.is_removable)
+        self.assertFalse(device.is_boot_disk)
+        self.assertFalse(device.is_system_disk)
+        self.assertEqual(device.partition_count, 1)
+        self.assertEqual(device.partition_style, "GPT")
+        self.assertEqual(device.filesystem_types, ("NTFS",))
+        self.assertEqual(device.operational_status, "Online")
 
     def test_missing_optional_values_are_allowed(self) -> None:
         device = _record_to_device(
@@ -67,6 +85,9 @@ class RecordConversionTests(unittest.TestCase):
         self.assertIsNone(device.media_type)
         self.assertIsNone(device.can_pool)
         self.assertIsNone(device.health_status)
+        self.assertIsNone(device.disk_number)
+        self.assertIsNone(device.is_boot_disk)
+        self.assertEqual(device.filesystem_types, ())
 
     def test_parent_usb_id_supplies_vid_pid_and_serial_is_cleaned(self) -> None:
         device = _record_to_device(

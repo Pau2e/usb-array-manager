@@ -24,3 +24,13 @@ class StorageDevice:
     container_id: str | None = None
     location_paths: tuple[str, ...] = ()
     slot: int | None = None
+    disk_number: int | None = None
+    is_removable: bool | None = None
+    is_boot_disk: bool | None = None
+    is_system_disk: bool | None = None
+    is_read_only: bool | None = None
+    is_offline: bool | None = None
+    partition_count: int | None = None
+    partition_style: str | None = None
+    filesystem_types: tuple[str, ...] = ()
+    operational_status: str | None = None

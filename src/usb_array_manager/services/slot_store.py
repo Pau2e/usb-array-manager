@@ -335,6 +335,16 @@ def _device_from_snapshot(snapshot: dict[str, Any]) -> StorageDevice:
         ),
         container_id=_optional_text(snapshot.get("container_id")),
         location_paths=_text_tuple(snapshot.get("location_paths")),
+        disk_number=_optional_int(snapshot.get("disk_number")),
+        is_removable=_optional_bool(snapshot.get("is_removable")),
+        is_boot_disk=_optional_bool(snapshot.get("is_boot_disk")),
+        is_system_disk=_optional_bool(snapshot.get("is_system_disk")),
+        is_read_only=_optional_bool(snapshot.get("is_read_only")),
+        is_offline=_optional_bool(snapshot.get("is_offline")),
+        partition_count=_optional_int(snapshot.get("partition_count")),
+        partition_style=_optional_text(snapshot.get("partition_style")),
+        filesystem_types=_text_tuple(snapshot.get("filesystem_types")),
+        operational_status=_optional_text(snapshot.get("operational_status")),
     )
 
 
@@ -356,6 +366,10 @@ def _optional_int(value: Any) -> int | None:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
 
 
 def _text_tuple(value: Any) -> tuple[str, ...]:

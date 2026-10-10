@@ -148,6 +148,26 @@ plan persistence, readiness validation, or disk behavior.
 Version 0.5.3 changes UI rendering only. RAID calculations, benchmark execution,
 failure rules, persistence, readiness validation, and disk behavior are unchanged.
 
+## Version 0.6 backend capability and dry-run planning
+
+- Adds a GUI-independent RAID backend interface with a read-only Windows Storage
+  Spaces capability implementation
+- Probes Windows disk number, removable/fixed state, BusType, MediaType,
+  CanPool, partitions, filesystems, health, operational status, and boot/system
+  protection fields
+- Adds a Backend / Deployment tab with `SUPPORTED`, `PARTIALLY SUPPORTED`,
+  `UNSUPPORTED`, or `UNKNOWN` status and explicit requirements or blockers
+- Reconciles every dry-run member through the saved logical-slot plan and shows
+  its current physical disk, identity, model, capacity, and future operations
+- Rejects system/boot disks, duplicate physical identities, disconnected or
+  ambiguous members, and saved-plan mapping mismatches
+- Shows a PowerShell command outline only as text under the permanent label
+  `PREVIEW ONLY — NOT EXECUTED`
+
+Version 0.6 has no RAID execution method and no Create RAID button. Its additional
+Windows queries use only read-only inventory commands. It never initializes,
+clears, partitions, formats, pools, mounts, unmounts, or otherwise modifies a disk.
+
 Qualification defaults:
 
 - `UNSTABLE`: write-sample coefficient of variation is at least 0.50

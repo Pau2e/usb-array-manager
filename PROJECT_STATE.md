@@ -2,10 +2,10 @@
 
 ## Current version
 
-**v0.5.3**
+**v0.6**
 
-The current work builds on the v0.5.2 checkpoint and applies two v0.5.3 UI-only
-bugfixes. All automated tests pass.
+The current work adds read-only Windows RAID backend capability detection and a
+text-only deployment dry run. It cannot execute storage commands or modify disks.
 
 ## Project purpose
 
@@ -56,6 +56,7 @@ usb-array-manager/
 │   │   ├── benchmark_result.py        # Persisted benchmark result
 │   │   ├── raid_plan.py               # Planner estimates and suggestion models
 │   │   ├── raid_failure.py            # Failure-simulation result models
+│   │   ├── raid_backend.py            # Backend capability/dry-run models
 │   │   └── saved_raid10_plan.py        # Durable plan and readiness models
 │   ├── services/
 │   │   ├── windows_cim.py             # Read-only Windows device discovery
@@ -67,7 +68,8 @@ usb-array-manager/
 │   │   ├── raid10_planner.py          # Pairing search, formulas, and warnings
 │   │   ├── raid10_failure_simulator.py# Pure failure/degraded-mode simulation
 │   │   ├── raid10_plan_store.py        # Atomic, versioned logical-slot plan
-│   │   └── raid10_readiness.py         # Strict read-only preflight rules
+│   │   ├── raid10_readiness.py         # Strict read-only preflight rules
+│   │   └── raid_backend.py             # Read-only backend capability checks
 │   └── ui/
 │       ├── main_window.py             # Inventory, slots, benchmark workflow
 │       ├── device_table_model.py      # Inventory/benchmark table model
@@ -182,6 +184,21 @@ and do not touch disks.
   repeated resets, checkbox changes, tab switches, and planner refreshes cannot
   collapse the table toward the left.
 
+### v0.6 — Backend capability and dry-run planning
+
+- Adds a GUI-independent `RaidBackend` abstraction and a read-only Windows
+  Storage Spaces capability implementation.
+- Extends inventory with disk number, removable/fixed state, boot/system flags,
+  read-only/offline state, partition count/style, filesystems, and operational
+  status using read-only Windows queries.
+- Adds a Backend / Deployment tab showing status, explanations, requirements,
+  blockers, physical mappings, and future operations for the saved plan.
+- Produces a PowerShell outline only as text labeled `PREVIEW ONLY — NOT
+  EXECUTED`.
+- Blocks system/boot disks, duplicate physical identities, disconnected or
+  ambiguous members, and saved-plan mapping mismatches.
+- Deliberately provides no execution API and no Create RAID control.
+
 ## Important design decisions
 
 1. **No drive-letter or PHYSICALDRIVE identity.** Both can change after reboot or
@@ -202,6 +219,9 @@ and do not touch disks.
    consume models and return models; they contain no disk-management calls.
 8. **Unknown data stays unknown.** Array totals that require missing capacity or
    benchmark values are reported unavailable rather than guessed.
+9. **Backend planning has no executor.** The v0.6 backend can only assess
+   immutable inventory data and return immutable display models. Future
+   destructive commands appear as documentation text and cannot be invoked.
 
 ## Persistent slot identification strategy
 
@@ -426,14 +446,12 @@ deletes it. No feature writes raw sectors or changes storage configuration.
 
 ## Exact next recommended milestone
 
-### v0.6 — Benchmark history and comparison
+### v0.6.x — Capability-probe hardening
 
-Keep USB operations within the existing temporary-file safety boundary. Preserve
-multiple benchmark runs per logical slot, show trends and test conditions, and
-make readiness use the latest compatible result. Do not begin real RAID creation
-until the Windows storage implementation, privilege model, recovery behavior,
-and destructive-action confirmation design have been separately specified and
-reviewed.
+Validate capability reporting across more Windows/USB bridge combinations and
+capture provider-specific reasons for `CanPool=False`. Do not add RAID execution
+until the privilege model, recovery behavior, destructive confirmation flow, and
+independent safety review have been explicitly specified.
 
 ## Important files and functions to inspect first
 
@@ -471,6 +489,11 @@ reviewed.
     - `tests/test_raid10_planner.py`
     - `tests/test_raid10_failure_simulator.py`
     - `tests/test_raid10_planner_dialog.py`
+11. `src/usb_array_manager/services/raid_backend.py`
+   - `RaidBackend` deliberately exposes assessment only; there is no execution
+     method.
+   - `WindowsStorageSpacesBackend.assess()` owns backend safety validation and
+     dry-run generation.
 
 Before making the next change, run the full test suite and check `git status` so
 this handoff document is not mistaken for an already committed file.

@@ -31,6 +31,22 @@ catch {
     $physicalDisks = @()
 }
 
+$storageDisks = @()
+try {
+    $storageDisks = @(Get-Disk -ErrorAction Stop)
+}
+catch {
+    $storageDisks = @()
+}
+
+$systemDrive = $null
+try {
+    $systemDrive = (Get-CimInstance -ClassName Win32_OperatingSystem).SystemDrive
+}
+catch {
+    $systemDrive = $null
+}
+
 function Get-NormalizedIdentityText {
     param([object]$Value)
 
@@ -84,6 +100,9 @@ $devices = @(
             $containerId = $null
             $locationPaths = @()
             $physicalDisk = Find-PhysicalDisk $disk $physicalDisks
+            $storageDisk = @(
+                $storageDisks | Where-Object { [string]$_.Number -eq [string]$disk.Index }
+            ) | Select-Object -First 1
 
             if ($canReadPnpProperties) {
                 try {
@@ -118,18 +137,25 @@ $devices = @(
                 }
             }
 
-            $letters = @(
+            $partitions = @(
                 Get-CimAssociatedInstance -InputObject $disk `
                     -Association Win32_DiskDriveToDiskPartition `
-                    -ResultClassName Win32_DiskPartition |
-                    ForEach-Object {
-                        Get-CimAssociatedInstance -InputObject $_ `
-                            -Association Win32_LogicalDiskToPartition `
-                            -ResultClassName Win32_LogicalDisk
-                    } |
-                    Where-Object { $_.DeviceID } |
-                    Select-Object -ExpandProperty DeviceID -Unique |
-                    Sort-Object
+                    -ResultClassName Win32_DiskPartition
+            )
+            $logicalDisks = @(
+                $partitions | ForEach-Object {
+                    Get-CimAssociatedInstance -InputObject $_ `
+                        -Association Win32_LogicalDiskToPartition `
+                        -ResultClassName Win32_LogicalDisk
+                }
+            )
+            $letters = @(
+                $logicalDisks | Where-Object { $_.DeviceID } |
+                    Select-Object -ExpandProperty DeviceID -Unique | Sort-Object
+            )
+            $fileSystems = @(
+                $logicalDisks | Where-Object { $_.FileSystem } |
+                    Select-Object -ExpandProperty FileSystem -Unique | Sort-Object
             )
 
             [PSCustomObject]@{
@@ -148,6 +174,26 @@ $devices = @(
                 storage_unique_id_format = if ($physicalDisk) { $physicalDisk.UniqueIdFormat } else { $null }
                 container_id   = $containerId
                 location_paths = $locationPaths
+                disk_number    = $disk.Index
+                is_removable   = if ($disk.MediaType) { $disk.MediaType -match 'Removable' } else { $null }
+                is_boot_disk   = if ($storageDisk) {
+                    $storageDisk.IsBoot
+                } else {
+                    @($partitions | Where-Object { $_.BootPartition }).Count -gt 0
+                }
+                is_system_disk = if ($storageDisk) {
+                    $storageDisk.IsSystem
+                } elseif ($systemDrive) {
+                    @($logicalDisks | Where-Object { $_.DeviceID -eq $systemDrive }).Count -gt 0
+                } else {
+                    $null
+                }
+                is_read_only   = if ($storageDisk) { $storageDisk.IsReadOnly } else { $null }
+                is_offline     = if ($storageDisk) { $storageDisk.IsOffline } else { $null }
+                partition_count = $partitions.Count
+                partition_style = if ($storageDisk) { $storageDisk.PartitionStyle } else { $null }
+                filesystem_types = $fileSystems
+                operational_status = if ($storageDisk) { $storageDisk.OperationalStatus } else { $disk.Status }
             }
         }
 )
@@ -316,6 +362,20 @@ def _record_to_device(record: Mapping[str, Any]) -> StorageDevice:
             for value in raw_location_paths
             if (location := _clean_text(value)) is not None
         ),
+        disk_number=_optional_int(record.get("disk_number")),
+        is_removable=_optional_bool(record.get("is_removable")),
+        is_boot_disk=_optional_bool(record.get("is_boot_disk")),
+        is_system_disk=_optional_bool(record.get("is_system_disk")),
+        is_read_only=_optional_bool(record.get("is_read_only")),
+        is_offline=_optional_bool(record.get("is_offline")),
+        partition_count=_optional_int(record.get("partition_count")),
+        partition_style=_clean_text(record.get("partition_style")),
+        filesystem_types=tuple(
+            filesystem
+            for value in _list_value(record.get("filesystem_types"))
+            if (filesystem := _clean_text(value)) is not None
+        ),
+        operational_status=_enum_or_list_text(record.get("operational_status")),
     )
 
 
@@ -362,3 +422,23 @@ def _optional_bool(value: Any) -> bool | None:
         if normalized == "false":
             return False
     return None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _list_value(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    return [] if value is None else [value]
+
+
+def _enum_or_list_text(value: Any) -> str | None:
+    values = [text for item in _list_value(value) if (text := _clean_text(item))]
+    return ", ".join(values) or None
