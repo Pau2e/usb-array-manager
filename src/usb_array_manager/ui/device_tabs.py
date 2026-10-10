@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from html import escape
 
-from PySide6.QtCore import QDateTime
+from PySide6.QtCore import QDateTime, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -20,7 +23,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from usb_array_manager.models.raid_backend import BackendAssessment
+from usb_array_manager.models.raid_backend import SUPPORTED, BackendAssessment
+from usb_array_manager.models.storage_device import StorageDevice
+from usb_array_manager.models.vhdx_probe import VhdxProbeResult
 from usb_array_manager.ui.device_table_model import (
     BenchmarkTableModel,
     OverviewTableModel,
@@ -159,26 +164,78 @@ class LogsTab(QWidget):
 
 
 class BackendDeploymentTab(QWidget):
+    backend_changed = Signal(str)
+    probe_requested = Signal(int)
+    performance_requested = Signal(int)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._assessments: dict[str, BackendAssessment] = {}
+        self._probe_running = False
+        self._successful_probe_identities: dict[int, str] = {}
+        self._device_identities: dict[int, str] = {}
         title = QLabel("RAID backend capability and deployment dry run")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
         safety = QLabel(
-            "PREVIEW ONLY — NOT EXECUTED. Version 0.6 can inspect capabilities and "
-            "describe future operations, but it cannot modify any disk."
+            "Production deployment remains PREVIEW ONLY. Version 0.7.1 may create, "
+            "attach, benchmark, detach, and delete one temporary test VHDX only."
         )
         safety.setStyleSheet("color: #b00020; font-weight: 700;")
         safety.setWordWrap(True)
         self.backend_name = QLabel("Backend: —")
+        self.backend_name.setVisible(False)
+        self.backend_selector = QComboBox()
         self.status = QLabel("UNKNOWN")
         self.status.setStyleSheet("font-size: 16px; font-weight: 700;")
         self.explanation = QLabel("Waiting for saved-plan and inventory state.")
         self.explanation.setWordWrap(True)
 
         status_row = QHBoxLayout()
-        status_row.addWidget(self.backend_name)
+        status_row.addWidget(QLabel("Backend:"))
+        status_row.addWidget(self.backend_selector)
         status_row.addWidget(self.status)
         status_row.addWidget(self.explanation, 1)
+
+        self.vhdx_panel = QGroupBox("Temporary VHDX capability probe")
+        self.vhdx_slot = QComboBox()
+        self.probe_button = QPushButton("Probe VHDX Backend")
+        self.performance_button = QPushButton("Run VHDX Performance Test")
+        self.performance_button.setEnabled(False)
+        self.vhdx_path = QLabel("—")
+        self.vhdx_attach = QLabel("Not run")
+        self.vhdx_identity = QLabel("—")
+        self.vhdx_can_pool = QLabel("Unknown")
+        self.vhdx_compatibility = QLabel("UNKNOWN")
+        self.vhdx_benchmark = QLabel("Not run")
+        self.vhdx_overhead = QLabel("Not measured")
+        self.vhdx_cleanup = QLabel("Not run")
+        for label in (
+            self.vhdx_path,
+            self.vhdx_attach,
+            self.vhdx_identity,
+            self.vhdx_benchmark,
+            self.vhdx_overhead,
+            self.vhdx_cleanup,
+        ):
+            label.setWordWrap(True)
+        controls = QHBoxLayout()
+        controls.addWidget(self.vhdx_slot)
+        controls.addWidget(self.probe_button)
+        controls.addWidget(self.performance_button)
+        form = QFormLayout(self.vhdx_panel)
+        form.addRow("Selected physical USB slot", controls)
+        form.addRow("Temporary VHDX path", self.vhdx_path)
+        form.addRow("Attach status", self.vhdx_attach)
+        form.addRow("Virtual disk identity", self.vhdx_identity)
+        form.addRow("CanPool", self.vhdx_can_pool)
+        form.addRow("Backend compatibility", self.vhdx_compatibility)
+        form.addRow("Direct vs VHDX benchmark", self.vhdx_benchmark)
+        form.addRow("Measured overhead", self.vhdx_overhead)
+        form.addRow("Cleanup status", self.vhdx_cleanup)
+        self.backend_selector.currentTextChanged.connect(self._backend_selected)
+        self.probe_button.clicked.connect(self._emit_probe)
+        self.performance_button.clicked.connect(self._emit_performance)
+        self.vhdx_slot.currentIndexChanged.connect(self._update_probe_controls)
 
         self.drive_table = QTableWidget(0, 11)
         self.drive_table.setHorizontalHeaderLabels(
@@ -220,8 +277,116 @@ class BackendDeploymentTab(QWidget):
         layout.addWidget(title)
         layout.addWidget(safety)
         layout.addLayout(status_row)
+        layout.addWidget(self.vhdx_panel)
         layout.addWidget(self.drive_table, 1)
         layout.addWidget(detail_splitter, 1)
+
+    def set_assessments(
+        self,
+        assessments: dict[str, BackendAssessment],
+        selected_name: str,
+    ) -> None:
+        self._assessments = dict(assessments)
+        self.backend_selector.blockSignals(True)
+        self.backend_selector.clear()
+        self.backend_selector.addItems(assessments)
+        self.backend_selector.setCurrentText(selected_name)
+        self.backend_selector.blockSignals(False)
+        self._backend_selected(self.backend_selector.currentText())
+
+    def set_devices(self, devices: tuple[StorageDevice, ...] | list[StorageDevice]) -> None:
+        previous = self.vhdx_slot.currentData()
+        self._device_identities = {
+            device.slot: _device_identity(device)
+            for device in devices
+            if device.slot is not None and device.is_connected
+        }
+        self.vhdx_slot.clear()
+        for device in devices:
+            if device.slot is not None and device.is_connected:
+                label = f"Slot {device.slot} — {device.model or 'USB device'}"
+                self.vhdx_slot.addItem(label, device.slot)
+        index = self.vhdx_slot.findData(previous)
+        if index >= 0:
+            self.vhdx_slot.setCurrentIndex(index)
+        self._update_probe_controls()
+
+    def set_probe_running(self, running: bool) -> None:
+        self._probe_running = running
+        self.probe_button.setEnabled(not running)
+        self.vhdx_slot.setEnabled(not running)
+        self._update_probe_controls()
+
+    def set_probe_result(self, result: VhdxProbeResult) -> None:
+        self.vhdx_path.setText(result.vhdx_path or "—")
+        self.vhdx_attach.setText(result.attach_status)
+        disk = result.virtual_disk
+        self.vhdx_identity.setText(disk.identity if disk else "—")
+        self.vhdx_can_pool.setText(
+            "Yes" if disk and disk.can_pool is True
+            else "No" if disk and disk.can_pool is False
+            else "Unknown"
+        )
+        self.vhdx_compatibility.setText(result.status)
+        if result.status == SUPPORTED and result.source_identity:
+            self._successful_probe_identities[result.slot] = result.source_identity
+        elif result.slot in self._successful_probe_identities:
+            del self._successful_probe_identities[result.slot]
+        self._update_probe_controls()
+        self.vhdx_cleanup.setText(result.cleanup_status)
+        if result.leftover_path:
+            self.vhdx_cleanup.setStyleSheet("color: #b00020; font-weight: 700;")
+            self.vhdx_cleanup.setText(
+                f"{result.cleanup_status}. Manual cleanup required: {result.leftover_path}"
+            )
+        else:
+            self.vhdx_cleanup.setStyleSheet("")
+        if result.benchmark:
+            item = result.benchmark
+            self.vhdx_benchmark.setText(
+                f"Direct: read {item.direct_read_mbps:.1f}, write {item.direct_write_mbps:.1f}, "
+                f"sustained {item.direct_sustained_write_mbps:.1f} MB/s | "
+                f"VHDX: read {item.vhdx_read_mbps:.1f}, write {item.vhdx_write_mbps:.1f}, "
+                f"sustained {item.vhdx_sustained_write_mbps:.1f} MB/s"
+            )
+            self.vhdx_overhead.setText(
+                f"Read {item.read_overhead_percent:+.1f}% | "
+                f"Write {item.write_overhead_percent:+.1f}% | "
+                f"Sustained {item.sustained_write_overhead_percent:+.1f}%"
+            )
+        else:
+            self.vhdx_benchmark.setText("Not run")
+            self.vhdx_overhead.setText("Not measured")
+
+    def _backend_selected(self, name: str) -> None:
+        assessment = self._assessments.get(name)
+        if assessment is not None:
+            self.set_assessment(assessment)
+        is_vhdx = name == "VHDX-backed Storage Spaces"
+        self.vhdx_panel.setVisible(is_vhdx)
+        self.backend_changed.emit(name)
+
+    def _emit_probe(self) -> None:
+        slot = self.vhdx_slot.currentData()
+        if slot is not None:
+            self.probe_requested.emit(int(slot))
+
+    def _emit_performance(self) -> None:
+        slot = self.vhdx_slot.currentData()
+        if slot is not None and self.performance_button.isEnabled():
+            self.performance_requested.emit(int(slot))
+
+    def _update_probe_controls(self) -> None:
+        slot = self.vhdx_slot.currentData()
+        identity = self._device_identities.get(slot) if slot is not None else None
+        probe_succeeded = (
+            slot is not None
+            and bool(identity)
+            and self._successful_probe_identities.get(slot) == identity
+        )
+        self.performance_button.setEnabled(
+            not self._probe_running and probe_succeeded
+        )
 
     def set_assessment(self, assessment: BackendAssessment) -> None:
         self.backend_name.setText(f"Backend: {assessment.backend_name}")
@@ -229,6 +394,8 @@ class BackendDeploymentTab(QWidget):
             "SUPPORTED": "#137333",
             "PARTIALLY SUPPORTED": "#9a6700",
             "UNSUPPORTED": "#b00020",
+            "PROBE FAILED": "#b00020",
+            "NEEDS ADMINISTRATOR": "#9a6700",
             "UNKNOWN": "#555",
         }
         self.status.setText(assessment.status)
@@ -284,3 +451,13 @@ class BackendDeploymentTab(QWidget):
 
 def _capacity_text(value: int | None) -> str:
     return f"{value / 1024**3:.1f} GiB" if value is not None else "Unknown"
+
+
+def _device_identity(device: StorageDevice) -> str:
+    return (
+        device.storage_unique_id
+        or device.container_id
+        or device.pnp_device_id
+        or device.device_path
+        or ""
+    )

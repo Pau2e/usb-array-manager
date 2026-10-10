@@ -168,6 +168,38 @@ Version 0.6 has no RAID execution method and no Create RAID button. Its addition
 Windows queries use only read-only inventory commands. It never initializes,
 clears, partitions, formats, pools, mounts, unmounts, or otherwise modifies a disk.
 
+## Version 0.7.1 VHDX-backed Storage Spaces evaluation
+
+- Adds `VHDX-backed Storage Spaces` through the existing `RaidBackend` interface
+- Lets the user select one mounted logical USB slot for an explicit temporary probe
+- Creates a uniquely named 512 MiB dynamic VHDX only inside
+  `.usb-array-manager-vhdx-test` on that selected filesystem
+- Attaches the temporary VHDX and reports its virtual disk identity, BusType,
+  MediaType, CanPool, operational status, health, and Storage Spaces compatibility
+- Always attempts detach and deletion; cleanup failures prominently report the
+  exact leftover path and never continue silently
+- Optionally compares direct-filesystem and VHDX-filesystem sequential read,
+  sequential write, and sustained write using temporary benchmark files
+- Initializes and formats only the disposable virtual disk inside the temporary
+  VHDX for that optional performance test; the physical USB disk is never passed
+  to initialization, partitioning, formatting, or Storage Spaces creation commands
+- Blocks production planning on FAT32 because files larger than 4 GiB cannot be
+  stored there, without offering or performing filesystem conversion
+- Produces a four-slot mapping and future Storage Spaces requirements as
+  `PREVIEW ONLY — NOT EXECUTED`; no production VHDX or real pool is created
+
+The temporary VHDX lifecycle uses built-in Windows DiskPart, so the Hyper-V
+PowerShell module is not required. PowerShell Storage cmdlets are used only to
+inspect and verify the newly attached file-backed disk. Missing DiskPart,
+insufficient free space, non-poolable virtual disks, and any attach, detach, or
+cleanup failure are reported without modifying existing USB data.
+
+DiskPart VHDX operations require the application to be started as Administrator.
+The elevation preflight runs before creating the test folder or VHDX. A
+non-elevated session reports `NEEDS ADMINISTRATOR`, and VHDX performance testing
+stays disabled until that slot and physical-device identity complete a successful
+capability probe.
+
 Qualification defaults:
 
 - `UNSTABLE`: write-sample coefficient of variation is at least 0.50
@@ -209,4 +241,6 @@ py -3.12 -m unittest discover -s tests -v
 
 Inventory and slot detection are read-only. Version 0.3 writes only a temporary
 benchmark file after explicit confirmation. It does not format, partition,
-initialize, mount, unmount, erase, or access raw storage devices.
+initialize, mount, unmount, erase, or access raw physical storage devices. Version
+0.7.1 may initialize and format only a newly created disposable virtual disk inside
+its uniquely named temporary VHDX, after explicit confirmation.

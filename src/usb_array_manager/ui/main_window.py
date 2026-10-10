@@ -16,9 +16,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from usb_array_manager.models.storage_device import StorageDevice
 from usb_array_manager.models.benchmark_result import BenchmarkResult
+from usb_array_manager.models.raid_backend import (
+    NEEDS_ADMINISTRATOR,
+    SUPPORTED,
+    BackendAssessment,
+)
 from usb_array_manager.models.saved_raid10_plan import SavedRaid10Plan
+from usb_array_manager.models.storage_device import StorageDevice
+from usb_array_manager.models.vhdx_probe import VhdxProbeResult
 from usb_array_manager.services.benchmark import (
     BenchmarkCancelled,
     BenchmarkError,
@@ -36,13 +42,17 @@ from usb_array_manager.services.raid10_plan_store import (
     Raid10PlanStore,
     Raid10PlanStoreError,
 )
-from usb_array_manager.services.raid_backend import WindowsStorageSpacesBackend
+from usb_array_manager.services.raid_backend import (
+    VhdxStorageSpacesBackend,
+    WindowsStorageSpacesBackend,
+)
 from usb_array_manager.services.slot_store import (
     SLOT_COUNT,
     SlotConflictError,
     SlotStore,
     SlotStoreError,
 )
+from usb_array_manager.services.vhdx_probe import probe_vhdx_backend
 from usb_array_manager.services.windows_cim import (
     DeviceDetectionError,
     detect_usb_storage_devices,
@@ -118,6 +128,37 @@ class BenchmarkThread(QThread):
             self.benchmark_succeeded.emit(result)
 
 
+class VhdxProbeThread(QThread):
+    probe_finished = Signal(object)
+    probe_failed = Signal(str)
+
+    def __init__(
+        self,
+        device: StorageDevice,
+        performance: bool,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._device = device
+        self._performance = performance
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
+    def run(self) -> None:
+        try:
+            result = probe_vhdx_backend(
+                self._device,
+                performance=self._performance,
+                cancel_event=self._cancel_event,
+            )
+        except Exception as error:
+            self.probe_failed.emit(f"Unexpected VHDX probe error: {error}")
+        else:
+            self.probe_finished.emit(result)
+
+
 class MainWindow(QMainWindow):
     DEVICE_CHANGE_DEBOUNCE_MS = 500
     RECONCILIATION_INTERVAL_MS = 30_000
@@ -126,6 +167,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._scan_thread: DeviceScanThread | None = None
         self._benchmark_thread: BenchmarkThread | None = None
+        self._vhdx_thread: VhdxProbeThread | None = None
         self._closing = False
         self._rescan_requested = False
         self._native_filter_installed = False
@@ -140,9 +182,16 @@ class MainWindow(QMainWindow):
         self._raid10_workspace: Raid10PlannerDialog | None = None
         self._last_inventory_signature: tuple | None = None
         self._last_readiness_text: str | None = None
-        self._raid_backend = WindowsStorageSpacesBackend()
+        windows_backend = WindowsStorageSpacesBackend()
+        self._vhdx_backend = VhdxStorageSpacesBackend()
+        self._raid_backends = {
+            windows_backend.name: windows_backend,
+            self._vhdx_backend.name: self._vhdx_backend,
+        }
+        self._raid_backend = windows_backend
+        self._selected_backend_name = windows_backend.name
 
-        self.setWindowTitle("USB Array Manager 0.6 — Read-only deployment planning")
+        self.setWindowTitle("USB Array Manager 0.7.1 — VHDX backend evaluation")
         self.setMinimumSize(1_050, 650)
         self.resize(1_350, 780)
 
@@ -159,6 +208,12 @@ class MainWindow(QMainWindow):
         self._cancel_benchmark_button = self._benchmarks_tab.cancel_button
         self._refresh_button = self._overview_tab.refresh_button
         self._assign_slot_button = self._overview_tab.assign_button
+
+        self._backend_tab.backend_changed.connect(self._backend_selection_changed)
+        self._backend_tab.probe_requested.connect(self._start_vhdx_probe)
+        self._backend_tab.performance_requested.connect(
+            lambda slot: self._start_vhdx_probe(slot, performance=True)
+        )
 
         self._cancel_benchmark_button.clicked.connect(self._cancel_benchmark)
         self._refresh_button.clicked.connect(self.refresh_devices)
@@ -251,6 +306,7 @@ class MainWindow(QMainWindow):
 
         self._model.set_devices(displayed_devices)
         self._benchmark_model.set_devices(displayed_devices)
+        self._backend_tab.set_devices(displayed_devices)
         self._install_benchmark_buttons()
         updated_at = QDateTime.currentDateTime().toString("HH:mm:ss")
         disconnected_count = sum(
@@ -475,13 +531,7 @@ class MainWindow(QMainWindow):
         self._raid10_workspace = workspace
         self._tabs.insertTab(2, workspace.planner_page, "RAID10 Planner")
         self._tabs.insertTab(3, workspace.failure_page, "Failure Simulator")
-        self._backend_tab.set_assessment(
-            self._raid_backend.assess(
-                self._saved_raid10_plan,
-                self._model.devices(),
-                ambiguous_slots=ambiguous_slots,
-            )
-        )
+        self._refresh_backend_assessments(ambiguous_slots)
         if was_planner:
             self._tabs.setCurrentWidget(workspace.planner_page)
         elif was_failure:
@@ -506,16 +556,149 @@ class MainWindow(QMainWindow):
         except SlotStoreError as error:
             ambiguous_slots = set()
             self._log("Slot reconciliation", str(error))
-        assessment = self._raid_backend.assess(
-            plan,
-            self._model.devices(),
-            ambiguous_slots=ambiguous_slots,
-        )
-        self._backend_tab.set_assessment(assessment)
+        assessments = self._refresh_backend_assessments(ambiguous_slots)
+        assessment = assessments[self._selected_backend_name]
         self._log(
             "Backend capability",
             f"{assessment.backend_name}: {assessment.status}. {assessment.explanation}",
         )
+
+    def _refresh_backend_assessments(
+        self,
+        ambiguous_slots: set[int] | frozenset[int],
+    ) -> dict[str, BackendAssessment]:
+        assessments = {
+            name: backend.assess(
+                self._saved_raid10_plan,
+                self._model.devices(),
+                ambiguous_slots=ambiguous_slots,
+            )
+            for name, backend in self._raid_backends.items()
+        }
+        self._backend_tab.set_assessments(
+            assessments,
+            self._selected_backend_name,
+        )
+        return assessments
+
+    def _backend_selection_changed(self, name: str) -> None:
+        if name in self._raid_backends:
+            self._selected_backend_name = name
+
+    def _start_vhdx_probe(self, slot: int, performance: bool = False) -> None:
+        if self._vhdx_thread is not None:
+            return
+        device = next(
+            (item for item in self._model.devices() if item.slot == slot and item.is_connected),
+            None,
+        )
+        if device is None:
+            QMessageBox.warning(self, "VHDX probe", f"Slot {slot} is not connected.")
+            return
+        if performance:
+            capability = self._vhdx_backend.probe_for_slot(slot)
+            if (
+                capability is None
+                or capability.status != SUPPORTED
+                or capability.leftover_path is not None
+                or capability.source_identity != _device_identity(device)
+            ):
+                message = (
+                    "Run a successful VHDX capability probe for this connected USB "
+                    "slot before starting the performance test."
+                )
+                self._log("VHDX performance test", message)
+                QMessageBox.warning(self, "VHDX performance test unavailable", message)
+                return
+        action = "performance test" if performance else "capability probe"
+        warning = QMessageBox(self)
+        warning.setIcon(QMessageBox.Icon.Warning)
+        warning.setWindowTitle(f"VHDX {action} — Slot {slot}")
+        warning.setText("A temporary VHDX file will be written to this USB filesystem.")
+        warning.setInformativeText(
+            "The file uses a unique name inside .usb-array-manager-vhdx-test. "
+            "It will be attached, inspected, detached, and deleted. The physical USB "
+            "disk will not be initialized, partitioned, or formatted.\n\n"
+            + (
+                "The performance test initializes and formats only the disposable virtual "
+                "disk inside that temporary VHDX file."
+                if performance else
+                "No filesystem is created during the capability-only probe."
+            )
+        )
+        warning.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        warning.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if warning.exec() != QMessageBox.StandardButton.Yes:
+            self._log("VHDX probe", f"Slot {slot} {action} cancelled before file creation.")
+            return
+        self._selected_backend_name = self._vhdx_backend.name
+        self._backend_tab.backend_selector.setCurrentText(self._selected_backend_name)
+        self._backend_tab.set_probe_running(True)
+        self._vhdx_thread = VhdxProbeThread(device, performance, self)
+        self._vhdx_thread.probe_finished.connect(self._vhdx_probe_finished)
+        self._vhdx_thread.probe_failed.connect(self._vhdx_probe_failed)
+        self._vhdx_thread.finished.connect(self._vhdx_thread_finished)
+        self._log("VHDX probe", f"Started Slot {slot} {action}.")
+        self._vhdx_thread.start()
+
+    def _vhdx_probe_finished(self, result: VhdxProbeResult) -> None:
+        self._vhdx_backend.record_probe(result)
+        self._backend_tab.set_probe_result(result)
+        try:
+            ambiguous = self._slot_store.ambiguous_slots(self._connected_devices)
+        except SlotStoreError:
+            ambiguous = set()
+        self._refresh_backend_assessments(ambiguous)
+        self._log(
+            "VHDX probe",
+            " ".join(
+                item
+                for item in (
+                    f"Slot {result.slot}: {result.status}.",
+                    result.explanation,
+                    f"Cleanup: {result.cleanup_status}.",
+                    (
+                        f"Diagnostic details: {result.diagnostic_details}"
+                        if result.diagnostic_details
+                        else ""
+                    ),
+                )
+                if item
+            ),
+        )
+        if result.leftover_path:
+            QMessageBox.critical(
+                self,
+                "VHDX cleanup failed",
+                f"Manual cleanup is required. The file may remain attached or present at:\n"
+                f"{result.leftover_path}\n\n{result.cleanup_status}",
+            )
+        elif result.status == NEEDS_ADMINISTRATOR:
+            QMessageBox.warning(
+                self,
+                "Administrator privileges required",
+                result.explanation,
+            )
+
+    def _vhdx_probe_failed(self, message: str) -> None:
+        self._log("VHDX probe error", message)
+        QMessageBox.warning(
+            self,
+            "VHDX probe failed",
+            message
+            + "\n\nNo production Storage Spaces operation was attempted. "
+            "Review Logs / Details before retrying.",
+        )
+
+    def _vhdx_thread_finished(self) -> None:
+        if self._vhdx_thread is not None:
+            self._vhdx_thread.deleteLater()
+        self._vhdx_thread = None
+        self._backend_tab.set_probe_running(False)
+        if self._closing:
+            QTimer.singleShot(0, self.close)
 
     def _set_benchmark_results_on_models(self) -> None:
         self._model.set_benchmark_results(self._benchmark_results)
@@ -699,13 +882,16 @@ class MainWindow(QMainWindow):
             self._benchmark_thread is not None
             and self._benchmark_thread.isRunning()
         )
-        if scan_running or benchmark_running:
+        vhdx_running = self._vhdx_thread is not None and self._vhdx_thread.isRunning()
+        if scan_running or benchmark_running or vhdx_running:
             self._closing = True
             self._device_change_timer.stop()
             self._reconciliation_timer.stop()
             self._remove_native_event_filter()
             if self._benchmark_thread is not None:
                 self._benchmark_thread.cancel()
+            if self._vhdx_thread is not None:
+                self._vhdx_thread.cancel()
             self._status.setText("Finishing safely and deleting temporary files…")
             self._benchmarks_tab.status.setText(
                 "Finishing safely and deleting temporary files…"
@@ -732,4 +918,14 @@ def _inventory_signature(devices: list[StorageDevice]) -> tuple:
             device.is_connected,
         )
         for device in devices
+    )
+
+
+def _device_identity(device: StorageDevice) -> str:
+    return (
+        device.storage_unique_id
+        or device.container_id
+        or device.pnp_device_id
+        or device.device_path
+        or ""
     )

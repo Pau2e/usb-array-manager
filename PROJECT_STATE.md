@@ -2,10 +2,11 @@
 
 ## Current version
 
-**v0.6**
+**v0.7.1**
 
-The current work adds read-only Windows RAID backend capability detection and a
-text-only deployment dry run. It cannot execute storage commands or modify disks.
+The current work adds an explicitly initiated, temporary VHDX-backed Storage
+Spaces capability and performance probe. Production deployment remains dry-run
+only and physical USB disk structure and existing files are never modified.
 
 ## Project purpose
 
@@ -57,6 +58,7 @@ usb-array-manager/
 │   │   ├── raid_plan.py               # Planner estimates and suggestion models
 │   │   ├── raid_failure.py            # Failure-simulation result models
 │   │   ├── raid_backend.py            # Backend capability/dry-run models
+│   │   ├── vhdx_probe.py              # Temporary VHDX probe/result models
 │   │   └── saved_raid10_plan.py        # Durable plan and readiness models
 │   ├── services/
 │   │   ├── windows_cim.py             # Read-only Windows device discovery
@@ -69,7 +71,8 @@ usb-array-manager/
 │   │   ├── raid10_failure_simulator.py# Pure failure/degraded-mode simulation
 │   │   ├── raid10_plan_store.py        # Atomic, versioned logical-slot plan
 │   │   ├── raid10_readiness.py         # Strict read-only preflight rules
-│   │   └── raid_backend.py             # Read-only backend capability checks
+│   │   ├── raid_backend.py             # Backend capability and dry-run checks
+│   │   └── vhdx_probe.py               # Restricted temporary VHDX workflow
 │   └── ui/
 │       ├── main_window.py             # Inventory, slots, benchmark workflow
 │       ├── device_table_model.py      # Inventory/benchmark table model
@@ -79,9 +82,9 @@ usb-array-manager/
 ```
 
 The design separates immutable data models, platform/service logic, and PySide6
-UI. Device discovery and benchmarks run in `QThread` workers so the GUI remains
-responsive. RAID calculations and failure simulations are pure Python services
-and do not touch disks.
+UI. Device discovery, benchmarks, and temporary VHDX probes run in `QThread`
+workers so the GUI remains responsive. RAID calculations and failure simulations
+are pure Python services and do not touch disks.
 
 ## Implemented features
 
@@ -199,6 +202,24 @@ and do not touch disks.
   ambiguous members, and saved-plan mapping mismatches.
 - Deliberately provides no execution API and no Create RAID control.
 
+### v0.7.1 — VHDX-backed Storage Spaces evaluation
+
+- Adds a second Windows `RaidBackend` implementation for VHDX-backed members.
+- Probes one selected mounted USB slot using a unique temporary VHDX file.
+- Performs an Administrator-token preflight before creating any probe folder or
+  file and reports `NEEDS ADMINISTRATOR` when elevation is required.
+- Queries the attached virtual disk's identity, BusType, MediaType, CanPool,
+  operational status, health, and Storage Spaces eligibility.
+- Guarantees detach/delete attempts through cleanup-finally handling and reports
+  any leftover path prominently.
+- Optionally benchmarks direct USB and the temporary VHDX filesystem and reports
+  read/write/sustained-write overhead.
+- Initializes and formats only the disposable virtual disk for the optional
+  performance test; no physical disk number is accepted for that workflow.
+- Blocks FAT32 production plans without formatting or converting the USB drive.
+- Generates a four-member production mapping as preview text only; it creates no
+  production VHDX files, pool, or virtual disk.
+
 ## Important design decisions
 
 1. **No drive-letter or PHYSICALDRIVE identity.** Both can change after reboot or
@@ -219,9 +240,10 @@ and do not touch disks.
    consume models and return models; they contain no disk-management calls.
 8. **Unknown data stays unknown.** Array totals that require missing capacity or
    benchmark values are reported unavailable rather than guessed.
-9. **Backend planning has no executor.** The v0.6 backend can only assess
-   immutable inventory data and return immutable display models. Future
-   destructive commands appear as documentation text and cannot be invoked.
+9. **Production backend planning has no executor.** Backend assessment consumes
+   immutable inventory data and returns immutable display models. The v0.7.1
+   executor is restricted to one uniquely named temporary VHDX and cannot create
+   production members or a Storage Spaces pool.
 
 ## Persistent slot identification strategy
 
@@ -446,10 +468,10 @@ deletes it. No feature writes raw sectors or changes storage configuration.
 
 ## Exact next recommended milestone
 
-### v0.6.x — Capability-probe hardening
+### v0.7.1.x — VHDX probe hardening
 
-Validate capability reporting across more Windows/USB bridge combinations and
-capture provider-specific reasons for `CanPool=False`. Do not add RAID execution
+Validate temporary VHDX capability reporting across more Windows editions, USB
+filesystems, DiskPart behavior, and Storage cmdlet versions. Do not add production RAID execution
 until the privilege model, recovery behavior, destructive confirmation flow, and
 independent safety review have been explicitly specified.
 

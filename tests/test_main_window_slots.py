@@ -5,7 +5,9 @@ from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication, QInputDialog
 
+from usb_array_manager.models.raid_backend import SUPPORTED
 from usb_array_manager.models.storage_device import StorageDevice
+from usb_array_manager.models.vhdx_probe import VhdxProbeResult
 from usb_array_manager.services.benchmark_store import BenchmarkStore
 from usb_array_manager.services.raid10_plan_store import Raid10PlanStore
 from usb_array_manager.services.slot_store import SlotStore
@@ -122,6 +124,40 @@ class MainWindowSlotTests(unittest.TestCase):
             self.assertEqual(
                 window._backend_tab.backend_name.text(),
                 "Backend: Windows Storage Spaces",
+            )
+            self.assertEqual(window._backend_tab.backend_selector.count(), 2)
+            window._backend_tab.backend_selector.setCurrentText(
+                "VHDX-backed Storage Spaces"
+            )
+            application.processEvents()
+            self.assertFalse(window._backend_tab.vhdx_panel.isHidden())
+            self.assertEqual(window._backend_tab.vhdx_slot.count(), 4)
+            self.assertFalse(window._backend_tab.performance_button.isEnabled())
+            selected_slot = window._backend_tab.vhdx_slot.currentData()
+            selected_device = next(item for item in window._model.devices() if item.slot == selected_slot)
+            window._backend_tab.set_probe_result(
+                VhdxProbeResult(
+                    slot=selected_slot,
+                    status=SUPPORTED,
+                    vhdx_path="temporary.vhdx",
+                    attach_status="Attached and detached",
+                    virtual_disk=None,
+                    cleanup_status="Detached and temporary file deleted",
+                    filesystem="exFAT",
+                    explanation="Capability probe succeeded.",
+                    source_identity=(
+                        selected_device.storage_unique_id
+                        or selected_device.container_id
+                        or selected_device.pnp_device_id
+                        or selected_device.device_path
+                    ),
+                )
+            )
+            self.assertTrue(window._backend_tab.performance_button.isEnabled())
+            window._backend_tab.vhdx_slot.setCurrentIndex(1)
+            self.assertFalse(window._backend_tab.performance_button.isEnabled())
+            window._backend_tab.backend_selector.setCurrentText(
+                "Windows Storage Spaces"
             )
             self.assertIn(
                 "PREVIEW ONLY — NOT EXECUTED",
