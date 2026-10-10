@@ -135,7 +135,7 @@ class MainWindow(QMainWindow):
         self._last_inventory_signature: tuple | None = None
         self._last_readiness_text: str | None = None
 
-        self.setWindowTitle("USB Array Manager 0.5.2 — Read-only planning workspace")
+        self.setWindowTitle("USB Array Manager 0.5.3 — Read-only planning workspace")
         self.setMinimumSize(1_050, 650)
         self.resize(1_350, 780)
 

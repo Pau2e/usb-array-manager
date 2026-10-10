@@ -143,7 +143,7 @@ class DeviceTableModelTests(unittest.TestCase):
         displayed_timestamp = benchmarks.data(benchmarks.index(0, 6))
         self.assertNotIn("2026-10-09T", displayed_timestamp)
         self.assertNotIn("+00:00", displayed_timestamp)
-        self.assertRegex(displayed_timestamp, r"^2026-10-0[89] \d{2}:\d{2}")
+        self.assertRegex(displayed_timestamp, r"^2026-10-0[89] \d{2}:\d{2}$")
 
 
 if __name__ == "__main__":

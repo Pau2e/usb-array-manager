@@ -136,6 +136,18 @@ Version 0.5.2 is presentation-only. It does not change device discovery, slot
 identity, benchmarking, RAID calculations, optimization, failure simulation,
 plan persistence, readiness validation, or disk behavior.
 
+## Version 0.5.3 UI bugfixes
+
+- Displays the local benchmark timestamp as `YYYY-MM-DD HH:MM` without the long
+  Windows timezone name; persisted ISO timestamps remain unchanged
+- Keeps Failure Simulator columns stable after checkbox changes, repeated resets,
+  tab switches, and planner-state refreshes
+- Sizes compact failure columns to their contents and stretches the read-estimate
+  column across the remaining table width using persistent Qt header policies
+
+Version 0.5.3 changes UI rendering only. RAID calculations, benchmark execution,
+failure rules, persistence, readiness validation, and disk behavior are unchanged.
+
 Qualification defaults:
 
 - `UNSTABLE`: write-sample coefficient of variation is at least 0.50

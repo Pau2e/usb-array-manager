@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QSizePolicy
+from PySide6.QtWidgets import QApplication, QHeaderView, QSizePolicy
 
 from usb_array_manager.models.benchmark_result import BenchmarkResult
 from usb_array_manager.models.storage_device import StorageDevice
@@ -58,6 +58,15 @@ class Raid10PlannerDialogTests(unittest.TestCase):
         self.assertIn("HEALTHY", dialog._array_health.text())
         self.assertEqual(dialog._content_splitter.orientation(), Qt.Orientation.Horizontal)
         self.assertGreaterEqual(dialog._failure_table.minimumHeight(), 150)
+        failure_header = dialog._failure_table.horizontalHeader()
+        self.assertEqual(
+            failure_header.sectionResizeMode(0),
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.assertEqual(
+            failure_header.sectionResizeMode(4),
+            QHeaderView.ResizeMode.Stretch,
+        )
         self.assertTrue(
             dialog.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint
         )
@@ -85,6 +94,10 @@ class Raid10PlannerDialogTests(unittest.TestCase):
         dialog._reset_failures()
         self.assertIn("HEALTHY", dialog._array_health.text())
         self.assertFalse(any(dialog._failure_checkboxes[slot].isChecked() for slot in range(1, 5)))
+        self.assertEqual(
+            failure_header.sectionResizeMode(4),
+            QHeaderView.ResizeMode.Stretch,
+        )
         dialog.close()
 
     def test_saved_plan_layout_is_reloaded_and_checked(self) -> None:

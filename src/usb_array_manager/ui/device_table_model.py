@@ -201,9 +201,7 @@ def _local_timestamp(value: str | None) -> str:
         parsed = parsed.astimezone()
     except ValueError:
         return value
-    timezone_name = parsed.tzname()
-    suffix = f" {timezone_name}" if timezone_name else ""
-    return parsed.strftime("%Y-%m-%d %H:%M") + suffix
+    return parsed.strftime("%Y-%m-%d %H:%M")
 
 
 class _FocusedDeviceTableModel(QAbstractTableModel):

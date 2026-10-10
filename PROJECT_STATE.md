@@ -2,10 +2,10 @@
 
 ## Current version
 
-**v0.5.2**
+**v0.5.3**
 
-The current work builds on the v0.5.1 checkpoint and applies the v0.5.2
-presentation-only polish. All 51 unit tests pass.
+The current work builds on the v0.5.2 checkpoint and applies two v0.5.3 UI-only
+bugfixes. All automated tests pass.
 
 ## Project purpose
 
@@ -171,6 +171,16 @@ and do not touch disks.
   space.
 - Verifies populated layouts at 1280 × 720 and 1366 × 768.
 - Preserves the single shared Planner/Failure Simulator plan and failure state.
+
+### v0.5.3 — Timestamp and simulator sizing fixes
+
+- Renders benchmark timestamps as local `YYYY-MM-DD HH:MM` values without
+  changing persisted ISO timestamps.
+- Uses stable `ResizeToContents` policies for compact Failure Simulator columns
+  and `Stretch` for the final read-estimate column.
+- Reapplies the shared header policy whenever simulation rows are refreshed so
+  repeated resets, checkbox changes, tab switches, and planner refreshes cannot
+  collapse the table toward the left.
 
 ## Important design decisions
 

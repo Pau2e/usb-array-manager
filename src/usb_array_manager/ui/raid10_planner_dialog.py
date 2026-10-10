@@ -244,10 +244,7 @@ class Raid10PlannerDialog(QDialog):
         )
         self._failure_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._failure_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        self._failure_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents
-        )
-        self._failure_table.horizontalHeader().setStretchLastSection(True)
+        self._configure_failure_table_columns()
         self._failure_table.verticalHeader().setVisible(False)
         self._failure_table.verticalHeader().setDefaultSectionSize(34)
         self._failure_table.setMinimumHeight(150)
@@ -687,7 +684,7 @@ class Raid10PlannerDialog(QDialog):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._failure_table.setItem(row, column, item)
-        self._failure_table.resizeColumnsToContents()
+        self._configure_failure_table_columns()
 
         color = "#137333"
         if simulation.array_status == ARRAY_DEGRADED:
@@ -712,6 +709,19 @@ class Raid10PlannerDialog(QDialog):
             f"{simulation.additional_failure_tolerance}<br>"
             f"<b>Current read performance:</b> "
             f"{_read_range(simulation.conservative_read_mbps, simulation.theoretical_max_read_mbps)}"
+        )
+
+    def _configure_failure_table_columns(self) -> None:
+        header = self._failure_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for column in range(self._failure_table.columnCount() - 1):
+            header.setSectionResizeMode(
+                column,
+                QHeaderView.ResizeMode.ResizeToContents,
+            )
+        header.setSectionResizeMode(
+            self._failure_table.columnCount() - 1,
+            QHeaderView.ResizeMode.Stretch,
         )
 
     def _reset_failures(self) -> None:
