@@ -73,12 +73,43 @@ class VhdxProbeSettings:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _StoragePhysicalDisk:
+    provider: str
+    device_id: str
+    friendly_name: str
+    unique_id: str
+    object_id: str
+    bus_type: str
+    media_type: str
+    can_pool: bool | None
+    health_status: str
+    operational_status: str
+
+
 class DiskPartVhdxRunner:
     """Manage one temporary VHDX with built-in DiskPart and inspect it via PowerShell."""
 
-    def __init__(self, timeout_seconds: int = 60) -> None:
+    def __init__(
+        self,
+        timeout_seconds: int = 60,
+        diagnostic_callback: Callable[[str], None] | None = None,
+    ) -> None:
         self.timeout_seconds = timeout_seconds
         self._attached_disk_numbers: dict[str, int] = {}
+        self._diagnostic_callback = diagnostic_callback
+        self._diagnostics: list[str] = []
+        self._storage_provider_available: bool | None = None
+        self.storage_inspection_warning = ""
+
+    @property
+    def diagnostic_details(self) -> str:
+        return "\n\n".join(self._diagnostics)
+
+    def _record_diagnostic(self, message: str) -> None:
+        self._diagnostics.append(message)
+        if self._diagnostic_callback is not None:
+            self._diagnostic_callback(message)
 
     def create(self, path: Path, size_bytes: int) -> None:
         size_mebibytes = max(1, (size_bytes + MEBIBYTE - 1) // MEBIBYTE)
@@ -94,6 +125,36 @@ class DiskPartVhdxRunner:
                 details=output,
             )
 
+    def create_and_attach(
+        self,
+        path: Path,
+        size_bytes: int,
+        *,
+        prepare_filesystem: bool,
+    ) -> VhdxDiskInfo:
+        """Create and attach with one explicit DiskPart script."""
+        before = self._enumerate_disks()
+        size_mebibytes = max(1, (size_bytes + MEBIBYTE - 1) // MEBIBYTE)
+        output = self._run_diskpart(
+            (
+                f"create vdisk file={_diskpart_quote(str(path))} "
+                f"maximum={size_mebibytes} type=expandable",
+                f"select vdisk file={_diskpart_quote(str(path))}",
+                "attach vdisk",
+            )
+        )
+        if not path.exists():
+            raise VhdxProbeError(
+                "DiskPart did not create the temporary VHDX.",
+                details=self.diagnostic_details or output,
+            )
+        return self._identify_attached_disk(
+            path,
+            before,
+            output,
+            prepare_filesystem=prepare_filesystem,
+        )
+
     def attach(self, path: Path, *, prepare_filesystem: bool) -> VhdxDiskInfo:
         before = self._enumerate_disks()
         output = self._run_diskpart(
@@ -102,6 +163,21 @@ class DiskPartVhdxRunner:
                 "attach vdisk",
             )
         )
+        return self._identify_attached_disk(
+            path,
+            before,
+            output,
+            prepare_filesystem=prepare_filesystem,
+        )
+
+    def _identify_attached_disk(
+        self,
+        path: Path,
+        before: dict[int, VhdxDiskInfo],
+        output: str,
+        *,
+        prepare_filesystem: bool,
+    ) -> VhdxDiskInfo:
         after = self._enumerate_disks()
         new_numbers = sorted(set(after) - set(before))
         if len(new_numbers) != 1:
@@ -123,7 +199,14 @@ class DiskPartVhdxRunner:
                     f"identity={disk.identity}."
                 ),
             )
+        if disk.can_pool is None:
+            disk = self._inspect_attached_storage_disk(disk)
         if prepare_filesystem:
+            if disk.can_pool is not True:
+                raise VhdxProbeError(
+                    "VHDX performance testing requires a successful capability "
+                    "probe with CanPool=True."
+                )
             volume_root = self._prepare_filesystem(disk)
             disk = VhdxDiskInfo(
                 disk.disk_number,
@@ -136,6 +219,92 @@ class DiskPartVhdxRunner:
                 volume_root,
             )
         return disk
+
+    def _inspect_attached_storage_disk(self, disk: VhdxDiskInfo) -> VhdxDiskInfo:
+        diagnostics = [
+            f"Win32_DiskDrive: READY — Disk {disk.disk_number} verified as "
+            "the single newly attached Microsoft virtual disk."
+        ]
+        get_disk_script = f"""
+$disk = Get-Disk -Number {disk.disk_number} -ErrorAction Stop
+[PSCustomObject]@{{
+    DeviceId = [string]$disk.Number
+    FriendlyName = [string]$disk.FriendlyName
+    UniqueId = [string]$disk.UniqueId
+    ObjectId = [string]$disk.ObjectId
+    BusType = [string]$disk.BusType
+    MediaType = ''
+    CanPool = $null
+    HealthStatus = 'Unknown'
+    OperationalStatus = [string]$disk.OperationalStatus
+}} | ConvertTo-Json -Depth 3 -Compress
+"""
+        get_physical_script = _physical_disk_query_script(
+            "@(Get-PhysicalDisk -ErrorAction Stop)"
+        )
+        primordial_script = _physical_disk_query_script(
+            "@(Get-StoragePool -IsPrimordial $true -ErrorAction Stop | "
+            "Get-PhysicalDisk -ErrorAction Stop)"
+        )
+        cim_script = _physical_disk_query_script(
+            "@(Get-CimInstance -Namespace 'root/Microsoft/Windows/Storage' "
+            "-ClassName MSFT_PhysicalDisk -ErrorAction Stop)"
+        )
+        candidates: list[_StoragePhysicalDisk] = []
+        query_specs = (
+            ("Get-Disk", get_disk_script, False),
+            ("Get-PhysicalDisk", get_physical_script, True),
+            ("Primordial Storage Pool", primordial_script, True),
+            ("MSFT_PhysicalDisk CIM", cim_script, True),
+        )
+        for provider, script, supplies_can_pool in query_specs:
+            try:
+                raw = self._run_powershell(script)
+                rows = _storage_physical_disks(raw, provider)
+            except VhdxProbeError as error:
+                full_diagnostic = error.details or str(error)
+                concise = _first_diagnostic_line(full_diagnostic)
+                diagnostics.append(f"{provider}: FAILED — {concise}")
+                self._record_diagnostic(
+                    f"{provider} capability-query failure details:\n"
+                    f"{full_diagnostic}"
+                )
+                continue
+            diagnostics.append(f"{provider}: READY — {len(rows)} object(s)")
+            if supplies_can_pool:
+                candidates.extend(rows)
+
+        matches = [
+            candidate
+            for candidate in candidates
+            if _matches_verified_virtual_disk(disk, candidate)
+        ]
+        result, resolution = _resolve_storage_match(disk, matches)
+        if result.can_pool is True:
+            diagnostics.append("CanPool: True")
+            self.storage_inspection_warning = ""
+        elif result.can_pool is False:
+            diagnostics.append("CanPool: False")
+            self.storage_inspection_warning = ""
+        elif matches:
+            diagnostics.append(f"CanPool: UNKNOWN — {resolution}")
+            self.storage_inspection_warning = (
+                "The verified VHDX matched a Storage Spaces physical disk, but "
+                "Windows did not expose CanPool. See Logs / Details."
+            )
+        else:
+            diagnostics.append(
+                "CanPool: UNKNOWN — no provider object safely matched Disk "
+                f"{disk.disk_number}"
+            )
+            self.storage_inspection_warning = (
+                "Windows Storage providers could not expose a safely matching "
+                "physical-disk object for the verified VHDX. See Logs / Details."
+            )
+        self._record_diagnostic(
+            "Storage Spaces capability inspection:\n" + "\n".join(diagnostics)
+        )
+        return result
 
     def detach(self, path: Path) -> None:
         output = self._run_diskpart(
@@ -158,11 +327,13 @@ class DiskPartVhdxRunner:
                 "DiskPart is unavailable on this Windows installation.",
                 unavailable=True,
             )
-        descriptor, script_name = tempfile.mkstemp(prefix="uam-vhdx-", suffix=".txt")
+        script = _render_diskpart_script(commands)
+        self._record_diagnostic(f"DiskPart script to execute:\n{script.rstrip()}")
+        descriptor, script_name = tempfile.mkstemp(prefix="uam-vhdx-", suffix=".scr")
         script_path = Path(script_name)
         try:
             os.close(descriptor)
-            script_path.write_text("\n".join(commands) + "\n", encoding="utf-16")
+            script_path.write_bytes(script.encode("utf-8"))
             result = subprocess.run(
                 [executable, "/s", str(script_path)],
                 capture_output=True,
@@ -170,6 +341,10 @@ class DiskPartVhdxRunner:
                 timeout=self.timeout_seconds,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
+            self._record_diagnostic(
+                "DiskPart invocation failed before a process result was available: "
+                f"{error!r}"
+            )
             if _requires_elevation(error):
                 raise VhdxProbeError(
                     ADMINISTRATOR_MESSAGE,
@@ -182,7 +357,15 @@ class DiskPartVhdxRunner:
             ) from error
         finally:
             script_path.unlink(missing_ok=True)
-        output = _clean_process_output(result.stdout, result.stderr)
+        stdout = _clean_output_stream(result.stdout)
+        stderr = _clean_output_stream(result.stderr)
+        output = "\n".join(item for item in (stdout, stderr) if item).strip()
+        self._record_diagnostic(
+            "DiskPart invocation: diskpart.exe /s <temporary probe script>\n"
+            f"Exit code: {result.returncode}\n"
+            f"Stdout:\n{stdout or '<empty>'}\n"
+            f"Stderr:\n{stderr or '<empty>'}"
+        )
         if result.returncode != 0:
             if _requires_elevation(output):
                 raise VhdxProbeError(
@@ -192,15 +375,55 @@ class DiskPartVhdxRunner:
                 )
             raise VhdxProbeError(
                 "DiskPart reported an error during the temporary VHDX operation.",
-                details=output,
+                details=self.diagnostic_details,
+            )
+        if _looks_like_diskpart_error(output):
+            raise VhdxProbeError(
+                "DiskPart reported that the VHDX script could not be completed.",
+                details=self.diagnostic_details,
+            )
+        if _looks_like_diskpart_help(output):
+            raise VhdxProbeError(
+                "DiskPart displayed command help instead of executing the VHDX script.",
+                details=self.diagnostic_details,
             )
         return output
 
     def _enumerate_disks(self) -> dict[int, VhdxDiskInfo]:
+        if self._storage_provider_available is not False:
+            try:
+                disks = self._enumerate_storage_disks()
+            except VhdxProbeError as error:
+                self._storage_provider_available = False
+                decoded = error.details or str(error)
+                self.storage_inspection_warning = (
+                    "The Windows Storage provider failed while querying Get-Disk/"
+                    "Get-PhysicalDisk; CanPool is unavailable. See Logs / Details."
+                )
+                self._record_diagnostic(
+                    "Primary Windows Storage inspection failed; using the read-only "
+                    "Win32_DiskDrive inventory fallback.\n"
+                    f"{decoded}"
+                )
+            else:
+                self._storage_provider_available = True
+                return disks
+        return self._enumerate_win32_disks()
+
+    def _enumerate_storage_disks(self) -> dict[int, VhdxDiskInfo]:
         script = r"""
-$physicalDisks = @(Get-PhysicalDisk -ErrorAction SilentlyContinue)
+$disks = try {
+    @(Get-Disk -ErrorAction Stop)
+} catch {
+    throw "Get-Disk failed: $($_.Exception.Message) [FullyQualifiedErrorId: $($_.FullyQualifiedErrorId)]"
+}
+$physicalDisks = try {
+    @(Get-PhysicalDisk -ErrorAction Stop)
+} catch {
+    throw "Get-PhysicalDisk failed: $($_.Exception.Message) [FullyQualifiedErrorId: $($_.FullyQualifiedErrorId)]"
+}
 @(
-    Get-Disk -ErrorAction Stop | ForEach-Object {
+    $disks | ForEach-Object {
         $disk = $_
         $physical = @($physicalDisks | Where-Object {
             ([string]$_.DeviceId -eq [string]$disk.Number) -or
@@ -219,6 +442,39 @@ $physicalDisks = @(Get-PhysicalDisk -ErrorAction SilentlyContinue)
 ) | ConvertTo-Json -Depth 3 -Compress
 """
         return _disk_records(self._run_powershell(script))
+
+    def _enumerate_win32_disks(self) -> dict[int, VhdxDiskInfo]:
+        script = r"""
+@(
+    Get-CimInstance -ClassName Win32_DiskDrive -ErrorAction Stop |
+        ForEach-Object {
+            $disk = $_
+            $model = [string]$disk.Model
+            $pnpId = [string]$disk.PNPDeviceID
+            $isMicrosoftVirtual =
+                ($model -match '(?i)Microsoft Virtual Disk') -and
+                ($pnpId -match '(?i)(VEN_MSFT|VIRTUAL_DISK)')
+            [PSCustomObject]@{
+                disk_number = [int]$disk.Index
+                identity = if ($pnpId) { $pnpId } else { [string]$disk.DeviceID }
+                bus_type = if ($isMicrosoftVirtual) { 'File Backed Virtual' } else { [string]$disk.InterfaceType }
+                media_type = [string]$disk.MediaType
+                can_pool = $null
+                operational_status = [string]$disk.Status
+                health_status = if ([string]$disk.Status -eq 'OK') { 'Healthy' } else { [string]$disk.Status }
+            }
+        }
+) | ConvertTo-Json -Depth 3 -Compress
+"""
+        try:
+            return _disk_records(self._run_powershell(script))
+        except VhdxProbeError as error:
+            raise VhdxProbeError(
+                "Pre-probe disk inventory failed before any VHDX was created.",
+                details=error.details or str(error),
+                unavailable=error.unavailable,
+                needs_administrator=error.needs_administrator,
+            ) from error
 
     def _prepare_filesystem(self, disk: VhdxDiskInfo) -> str:
         if not disk.identity or disk.identity == "Unknown":
@@ -248,10 +504,18 @@ $partition | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'UAM_VHDX_TEST' 
     def _run_powershell(self, script: str) -> str:
         script = (
             "$ErrorActionPreference='Stop'\n"
+            "$ProgressPreference='SilentlyContinue'\n"
             "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)\n"
             "try {\n"
             + script
-            + "\n} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
+            + "\n} catch {\n"
+            "  $message = [string]$_.Exception.Message\n"
+            "  [Console]::Error.WriteLine($message)\n"
+            "  if ($message -notmatch 'FullyQualifiedErrorId:') {\n"
+            "    [Console]::Error.WriteLine('FullyQualifiedErrorId: ' + $_.FullyQualifiedErrorId)\n"
+            "  }\n"
+            "  exit 1\n"
+            "}"
         )
         encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
         try:
@@ -305,9 +569,12 @@ def probe_vhdx_backend(
     name_factory: Callable[[], str] | None = None,
     cancel_event: threading.Event | None = None,
     elevation_checker: Callable[[], bool | None] | None = None,
+    diagnostic_callback: Callable[[str], None] | None = None,
 ) -> VhdxProbeResult:
     active_settings = settings or VhdxProbeSettings()
-    active_runner = runner or DiskPartVhdxRunner()
+    active_runner = runner or DiskPartVhdxRunner(
+        diagnostic_callback=diagnostic_callback
+    )
     filesystem = ", ".join(device.filesystem_types) or "Unknown"
     source_identity = _device_identity(device)
     slot = device.slot or 0
@@ -399,14 +666,31 @@ def probe_vhdx_backend(
         if path.exists():
             raise VhdxProbeError(f"Refusing to overwrite existing test file: {path}")
         creation_attempted = True
-        active_runner.create(path, active_settings.vhdx_size_bytes)
-        if not path.exists():
-            raise VhdxProbeError("VHDX creation command completed but the file was not found.")
-        owns_path = True
         if cancel_event is not None and cancel_event.is_set():
-            raise VhdxProbeError("VHDX probe cancelled before attach.")
-        attach_attempted = True
-        disk_info = active_runner.attach(path, prepare_filesystem=performance)
+            raise VhdxProbeError("VHDX probe cancelled before create/attach.")
+        combined_create_attach = getattr(active_runner, "create_and_attach", None)
+        if callable(combined_create_attach):
+            try:
+                disk_info = combined_create_attach(
+                    path,
+                    active_settings.vhdx_size_bytes,
+                    prepare_filesystem=performance,
+                )
+            finally:
+                # The unique target was proven absent immediately before execution.
+                # If DiskPart created it before a later command failed, it belongs to
+                # this probe and must enter the same detach/delete cleanup path.
+                owns_path = path.exists()
+                attach_attempted = owns_path
+        else:
+            active_runner.create(path, active_settings.vhdx_size_bytes)
+            if not path.exists():
+                raise VhdxProbeError(
+                    "VHDX creation command completed but the file was not found."
+                )
+            owns_path = True
+            attach_attempted = True
+            disk_info = active_runner.attach(path, prepare_filesystem=performance)
         attach_status = f"Attached as Disk {disk_info.disk_number}"
         if disk_info.bus_type.casefold() != "file backed virtual":
             raise VhdxProbeError(
@@ -461,6 +745,13 @@ def probe_vhdx_backend(
         except OSError:
             pass
 
+    runner_details = getattr(active_runner, "diagnostic_details", "")
+    operation_details = "\n\n".join(
+        item
+        for index, item in enumerate((operation_details, runner_details))
+        if item and item not in (operation_details, runner_details)[:index]
+    )
+
     ambiguous_creation_residue = creation_attempted and not owns_path and path.exists()
     leftover = str(path) if (owns_path and path.exists()) or ambiguous_creation_residue else None
     if detach_error:
@@ -498,7 +789,8 @@ def probe_vhdx_backend(
     if disk_info.can_pool is not True:
         status = UNKNOWN if disk_info.can_pool is None else UNSUPPORTED
         explanation = (
-            "Windows did not report Storage Spaces CanPool for the temporary virtual disk."
+            getattr(active_runner, "storage_inspection_warning", "")
+            or "Windows did not report Storage Spaces CanPool for the temporary virtual disk."
             if disk_info.can_pool is None
             else "Windows Storage Spaces reported CanPool=False for the temporary virtual disk."
         )
@@ -516,6 +808,7 @@ def probe_vhdx_backend(
         explanation=explanation,
         benchmark=comparison,
         source_identity=source_identity,
+        diagnostic_details=operation_details,
     )
 
 
@@ -585,6 +878,137 @@ def _benchmark_comparison(
     )
 
 
+def _physical_disk_query_script(source_expression: str) -> str:
+    return f"""
+$physicalDisks = {source_expression}
+@(
+    $physicalDisks | ForEach-Object {{
+        [PSCustomObject]@{{
+            DeviceId = [string]$_.DeviceId
+            FriendlyName = [string]$_.FriendlyName
+            UniqueId = [string]$_.UniqueId
+            ObjectId = [string]$_.ObjectId
+            BusType = [string]$_.BusType
+            MediaType = [string]$_.MediaType
+            CanPool = $_.CanPool
+            HealthStatus = [string]$_.HealthStatus
+            OperationalStatus = [string]$_.OperationalStatus
+        }}
+    }}
+) | ConvertTo-Json -Depth 3 -Compress
+"""
+
+
+def _storage_physical_disks(
+    raw: str,
+    provider: str,
+) -> list[_StoragePhysicalDisk]:
+    if not raw.strip():
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise VhdxProbeError(
+            f"{provider} returned invalid JSON capability data.",
+            details=raw,
+        ) from error
+    records = payload if isinstance(payload, list) else [payload]
+    candidates: list[_StoragePhysicalDisk] = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise VhdxProbeError(
+                f"{provider} returned an invalid physical-disk record."
+            )
+        candidates.append(
+            _StoragePhysicalDisk(
+                provider=provider,
+                device_id=str(record.get("DeviceId") or ""),
+                friendly_name=str(record.get("FriendlyName") or ""),
+                unique_id=str(record.get("UniqueId") or ""),
+                object_id=str(record.get("ObjectId") or ""),
+                bus_type=str(record.get("BusType") or "Unknown"),
+                media_type=str(record.get("MediaType") or "Unknown"),
+                can_pool=_optional_bool(record.get("CanPool")),
+                health_status=str(record.get("HealthStatus") or "Unknown"),
+                operational_status=str(
+                    record.get("OperationalStatus") or "Unknown"
+                ),
+            )
+        )
+    return candidates
+
+
+def _matches_verified_virtual_disk(
+    disk: VhdxDiskInfo,
+    candidate: _StoragePhysicalDisk,
+) -> bool:
+    device_number_match = candidate.device_id.strip() == str(disk.disk_number)
+    virtual_hint = (
+        candidate.bus_type.casefold() == "file backed virtual"
+        or "virtual" in candidate.friendly_name.casefold()
+        or "virtual" in candidate.object_id.casefold()
+    )
+    identity = _identity_token(disk.identity)
+    candidate_identities = tuple(
+        token
+        for token in (
+            _identity_token(candidate.unique_id),
+            _identity_token(candidate.object_id),
+        )
+        if token
+    )
+    identity_match = bool(identity) and any(
+        identity == token
+        or (len(identity) >= 12 and identity in token)
+        or (len(token) >= 12 and token in identity)
+        for token in candidate_identities
+    )
+    return virtual_hint and (device_number_match or identity_match)
+
+
+def _resolve_storage_match(
+    disk: VhdxDiskInfo,
+    matches: list[_StoragePhysicalDisk],
+) -> tuple[VhdxDiskInfo, str]:
+    values = {candidate.can_pool for candidate in matches if candidate.can_pool is not None}
+    if len(values) > 1:
+        return disk, "matching providers returned conflicting values"
+    can_pool = next(iter(values), None)
+    selected = next(
+        (candidate for candidate in matches if candidate.can_pool is can_pool),
+        matches[0] if matches else None,
+    )
+    if selected is None:
+        return disk, "no provider object safely matched the verified VHDX"
+    resolved = VhdxDiskInfo(
+        disk_number=disk.disk_number,
+        identity=selected.unique_id or selected.object_id or disk.identity,
+        bus_type=(
+            selected.bus_type
+            if selected.bus_type.casefold() == "file backed virtual"
+            else disk.bus_type
+        ),
+        media_type=selected.media_type or disk.media_type,
+        can_pool=can_pool,
+        operational_status=selected.operational_status or disk.operational_status,
+        health_status=selected.health_status or disk.health_status,
+        volume_root=disk.volume_root,
+    )
+    return resolved, (
+        "matched provider object has no CanPool value"
+        if can_pool is None
+        else f"matched by {selected.provider}"
+    )
+
+
+def _identity_token(value: str) -> str:
+    return re.sub(r"[^0-9a-z]", "", value.casefold())
+
+
+def _first_diagnostic_line(value: str) -> str:
+    return next((line.strip() for line in value.splitlines() if line.strip()), "Unknown error")
+
+
 def _failure(
     slot: int,
     source_identity: str,
@@ -648,12 +1072,19 @@ def _disk_info_from_record(record: Mapping[str, Any]) -> VhdxDiskInfo:
 
 
 def _clean_process_output(stdout: bytes, stderr: bytes) -> str:
-    parts = []
-    for raw in (stdout, stderr):
-        text = _decode_process_output(raw)
-        if text:
-            parts.append(_clean_clixml(text))
-    return "\n".join(item for item in parts if item).strip()
+    return "\n".join(
+        item
+        for item in (
+            _clean_output_stream(stdout),
+            _clean_output_stream(stderr),
+        )
+        if item
+    ).strip()
+
+
+def _clean_output_stream(raw: bytes) -> str:
+    text = _decode_process_output(raw)
+    return _clean_clixml(text) if text else ""
 
 
 def _decode_process_output(raw: bytes) -> str:
@@ -668,22 +1099,39 @@ def _clean_clixml(text: str) -> str:
     marker = "#< CLIXML"
     if marker not in text:
         return text
-    xml_text = text.split(marker, 1)[1].strip()
+    payload = text.split(marker, 1)[1].strip()
+    xml_start = payload.find("<Objs")
+    plain_text = payload[:xml_start].strip() if xml_start >= 0 else payload
+    xml_text = payload[xml_start:] if xml_start >= 0 else ""
+    messages: list[str] = []
+    if plain_text:
+        messages.append(_decode_powershell_text(plain_text))
+    if not xml_text:
+        return "\n".join(item for item in messages if item)
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
-        return "PowerShell returned encoded diagnostic output."
-    messages: list[str] = []
+        fallback = re.sub(r"<[^>]+>", " ", xml_text)
+        fallback = " ".join(_decode_powershell_text(fallback).split())
+        if fallback:
+            messages.append(fallback)
+        return "\n".join(item for item in messages if item) or (
+            "PowerShell returned unreadable encoded diagnostic output."
+        )
     for element in root.iter():
         if element.tag.rsplit("}", 1)[-1] == "S" and element.text:
-            decoded = re.sub(
-                r"_x([0-9A-Fa-f]{4})_",
-                lambda match: chr(int(match.group(1), 16)),
-                html.unescape(element.text),
-            ).strip()
+            decoded = _decode_powershell_text(element.text)
             if decoded and decoded not in messages:
                 messages.append(decoded)
-    return "\n".join(messages) or "PowerShell returned encoded diagnostic output."
+    return "\n".join(messages) or "PowerShell returned unreadable encoded diagnostic output."
+
+
+def _decode_powershell_text(text: str) -> str:
+    return re.sub(
+        r"_x([0-9A-Fa-f]{4})_",
+        lambda match: chr(int(match.group(1), 16)),
+        html.unescape(text),
+    ).strip()
 
 
 def _requires_elevation(value: object) -> bool:
@@ -696,6 +1144,57 @@ def _requires_elevation(value: object) -> bool:
             "winerror 740",
             "requires elevation",
             "requested operation requires elevation",
+        )
+    )
+
+
+def _render_diskpart_script(commands: tuple[str, ...]) -> str:
+    if not commands:
+        raise VhdxProbeError("Refusing to run an empty DiskPart script.")
+    rendered: list[str] = []
+    for command in commands:
+        clean = command.strip()
+        if not clean or any(character in clean for character in ("\r", "\n")):
+            raise VhdxProbeError("A DiskPart command contains invalid line breaks.")
+        if clean.casefold() == "exit":
+            continue
+        rendered.append(clean)
+    rendered.append("exit")
+    return "\r\n".join(rendered) + "\r\n"
+
+
+def _looks_like_diskpart_help(output: str) -> bool:
+    normalized = output.casefold()
+    help_markers = (
+        "active      - marks the current partition as active",
+        "assign      - assigns a drive letter",
+        "create      - creates a volume, partition or virtual disk",
+        "select      - shifts the focus to an object",
+        "commands:",
+    )
+    marker_count = sum(marker in normalized for marker in help_markers)
+    command_list_count = len(
+        re.findall(
+            r"(?im)^\s*(?:active|add|assign|attributes|attach|automount|break|clean|compact|convert|create|delete|detail|detach|exit|extend|filesystems|format|gpt|help|import|inactive|list|merge|online|offline|recover|remove|repair|rescan|retain|san|select|setid|shrink|uniqueid)\s+-",
+            output,
+        )
+    )
+    return command_list_count >= 5 or marker_count >= 2 or (
+        "microsoft diskpart" in normalized
+        and "list of commands" in normalized
+    )
+
+
+def _looks_like_diskpart_error(output: str) -> bool:
+    normalized = output.casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "diskpart has encountered an error",
+            "virtual disk service error",
+            "the arguments specified for this command are not valid",
+            "there is no virtual disk selected",
+            "the system cannot find the file specified",
         )
     )
 

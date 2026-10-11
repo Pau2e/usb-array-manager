@@ -208,6 +208,10 @@ are pure Python services and do not touch disks.
 - Probes one selected mounted USB slot using a unique temporary VHDX file.
 - Performs an Administrator-token preflight before creating any probe folder or
   file and reports `NEEDS ADMINISTRATOR` when elevation is required.
+- Falls back to read-only `Win32_DiskDrive` snapshots when the Windows Storage
+  CIM provider cannot enumerate disks, then independently tries
+  `Get-PhysicalDisk`, the primordial-pool pipeline, and direct
+  `MSFT_PhysicalDisk` CIM for `CanPool`; unmatched capability remains unknown.
 - Queries the attached virtual disk's identity, BusType, MediaType, CanPool,
   operational status, health, and Storage Spaces eligibility.
 - Guarantees detach/delete attempts through cleanup-finally handling and reports

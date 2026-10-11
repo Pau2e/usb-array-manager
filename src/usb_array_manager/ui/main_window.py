@@ -131,6 +131,7 @@ class BenchmarkThread(QThread):
 class VhdxProbeThread(QThread):
     probe_finished = Signal(object)
     probe_failed = Signal(str)
+    diagnostic = Signal(str)
 
     def __init__(
         self,
@@ -152,6 +153,7 @@ class VhdxProbeThread(QThread):
                 self._device,
                 performance=self._performance,
                 cancel_event=self._cancel_event,
+                diagnostic_callback=self.diagnostic.emit,
             )
         except Exception as error:
             self.probe_failed.emit(f"Unexpected VHDX probe error: {error}")
@@ -639,6 +641,9 @@ class MainWindow(QMainWindow):
         self._vhdx_thread = VhdxProbeThread(device, performance, self)
         self._vhdx_thread.probe_finished.connect(self._vhdx_probe_finished)
         self._vhdx_thread.probe_failed.connect(self._vhdx_probe_failed)
+        self._vhdx_thread.diagnostic.connect(
+            lambda message: self._log("VHDX DiskPart", message)
+        )
         self._vhdx_thread.finished.connect(self._vhdx_thread_finished)
         self._log("VHDX probe", f"Started Slot {slot} {action}.")
         self._vhdx_thread.start()

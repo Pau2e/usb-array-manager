@@ -194,6 +194,22 @@ inspect and verify the newly attached file-backed disk. Missing DiskPart,
 insufficient free space, non-poolable virtual disks, and any attach, detach, or
 cleanup failure are reported without modifying existing USB data.
 
+DiskPart is invoked only with explicit temporary `/s` script files. Create and
+attach share one script, detach uses a separate cleanup script, every script ends
+with `exit`, and each temporary script is deleted immediately after its process
+finishes. The generated commands and captured exit code/stdout/stderr are retained
+in Logs / Details.
+
+Before creating a VHDX, the probe takes a read-only disk snapshot. If the modern
+Windows Storage provider itself fails (for example, `Get-Disk` returns CIM
+`Invalid property`), the probe records the fully decoded provider diagnostic and
+falls back to `Win32_DiskDrive` for safe before/after disk-number detection. In
+that case it independently tries `Get-PhysicalDisk`, the primordial storage-pool
+pipeline, and direct `MSFT_PhysicalDisk` CIM. A provider object is accepted only
+when its identifiers and virtual-disk attributes safely match the verified new
+disk. If none can expose a match, `CanPool` remains unknown rather than being
+guessed, and the main UI directs the user to Logs / Details.
+
 DiskPart VHDX operations require the application to be started as Administrator.
 The elevation preflight runs before creating the test folder or VHDX. A
 non-elevated session reports `NEEDS ADMINISTRATOR`, and VHDX performance testing

@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -143,6 +144,19 @@ class VhdxProbeTests(unittest.TestCase):
         result = self.run_probe(FakeRunner(can_pool=None))
         self.assertEqual(result.status, UNKNOWN)
 
+    def test_storage_provider_warning_is_concise_in_probe_result(self) -> None:
+        runner = FakeRunner(can_pool=None)
+        runner.storage_inspection_warning = (
+            "The Windows Storage provider failed while querying Get-Disk/"
+            "Get-PhysicalDisk; CanPool is unavailable. See Logs / Details."
+        )
+
+        result = self.run_probe(runner)
+
+        self.assertEqual(result.status, UNKNOWN)
+        self.assertEqual(result.explanation, runner.storage_inspection_warning)
+        self.assertNotIn("CLIXML", result.explanation)
+
     def test_non_elevated_probe_stops_before_any_file_operation(self) -> None:
         runner = FakeRunner()
 
@@ -284,11 +298,15 @@ class VhdxProbeTests(unittest.TestCase):
         self.assertFalse(runner.created)
 
     def test_diskpart_unavailable_is_unknown(self) -> None:
-        with patch(
-            "usb_array_manager.services.vhdx_probe.shutil.which",
-            return_value=None,
+        runner = DiskPartVhdxRunner()
+        with (
+            patch(
+                "usb_array_manager.services.vhdx_probe.shutil.which",
+                return_value=None,
+            ),
+            patch.object(runner, "_enumerate_disks", return_value={}),
         ):
-            result = self.run_probe(DiskPartVhdxRunner())
+            result = self.run_probe(runner)
 
         self.assertEqual(result.status, UNKNOWN)
         self.assertIn("DiskPart is unavailable", result.explanation)
@@ -360,18 +378,61 @@ class DiskPartVhdxRunnerTests(unittest.TestCase):
         )
         self.assertEqual(detected.disk_number, 42)
 
+    def test_create_and_attach_uses_one_script_and_before_after_inventory(self) -> None:
+        runner = DiskPartVhdxRunner()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.vhdx"
+            before = {0: self.disk(0, "SATA")}
+            virtual = self.disk(42)
+            after = {0: self.disk(0, "SATA"), 42: virtual}
+            observed: list[tuple[str, ...]] = []
+
+            def run_diskpart(commands: tuple[str, ...]) -> str:
+                observed.append(commands)
+                path.write_bytes(b"vhdx")
+                return "created and attached"
+
+            with (
+                patch.object(runner, "_run_diskpart", side_effect=run_diskpart),
+                patch.object(
+                    runner,
+                    "_enumerate_disks",
+                    side_effect=(before, after),
+                ) as enumerate_disks,
+            ):
+                detected = runner.create_and_attach(
+                    path,
+                    512 * 1024**2,
+                    prepare_filesystem=False,
+                )
+
+        quoted = f'"{path}"'
+        self.assertEqual(
+            observed,
+            [
+                (
+                    f"create vdisk file={quoted} maximum=512 type=expandable",
+                    f"select vdisk file={quoted}",
+                    "attach vdisk",
+                )
+            ],
+        )
+        self.assertEqual(enumerate_disks.call_count, 2)
+        self.assertIs(detected, virtual)
+
     def test_diskpart_script_uses_one_command_per_line_and_is_removed(self) -> None:
         runner = DiskPartVhdxRunner()
         observed: dict[str, object] = {}
 
         def run(command, **_kwargs):
             script_path = Path(command[2])
+            observed["diagnostic_before_run"] = runner.diagnostic_details
             observed["command"] = command
             observed["script_path"] = script_path
-            observed["script"] = script_path.read_text(encoding="utf-16")
+            observed["script"] = script_path.read_text(encoding="utf-8")
             return SimpleNamespace(
                 returncode=0,
-                stdout="DiskPart succeeded".encode("utf-16"),
+                stdout=b"DiskPart succeeded",
                 stderr=b"",
             )
 
@@ -386,7 +447,11 @@ class DiskPartVhdxRunnerTests(unittest.TestCase):
             ),
         ):
             output = runner._run_diskpart(
-                ('select vdisk file="C:\\probe.vhdx"', "attach vdisk")
+                (
+                    'create vdisk file="J:\\path\\probe.vhdx" maximum=512 type=expandable',
+                    'select vdisk file="J:\\path\\probe.vhdx"',
+                    "attach vdisk",
+                )
             )
 
         self.assertEqual(
@@ -395,10 +460,129 @@ class DiskPartVhdxRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             observed["script"],
-            'select vdisk file="C:\\probe.vhdx"\nattach vdisk\n',
+            'create vdisk file="J:\\path\\probe.vhdx" maximum=512 type=expandable\n'
+            'select vdisk file="J:\\path\\probe.vhdx"\n'
+            "attach vdisk\n"
+            "exit\n",
         )
         self.assertFalse(observed["script_path"].exists())
         self.assertEqual(output, "DiskPart succeeded")
+        self.assertIn("Exit code: 0", runner.diagnostic_details)
+        self.assertIn("Stdout:\nDiskPart succeeded", runner.diagnostic_details)
+        self.assertNotIn(str(observed["script_path"]), runner.diagnostic_details)
+        self.assertIn(
+            "DiskPart script to execute",
+            observed["diagnostic_before_run"],
+        )
+
+    def test_generic_diskpart_help_is_an_execution_failure(self) -> None:
+        runner = DiskPartVhdxRunner()
+        generic_help = b"""Microsoft DiskPart version 10.0
+ACTIVE      - Marks the current partition as active.
+ASSIGN      - Assigns a drive letter or mount point.
+CREATE      - Creates a volume, partition or virtual disk.
+SELECT      - Shifts the focus to an object.
+"""
+        with (
+            patch(
+                "usb_array_manager.services.vhdx_probe.shutil.which",
+                return_value=r"C:\Windows\System32\diskpart.exe",
+            ),
+            patch(
+                "usb_array_manager.services.vhdx_probe.subprocess.run",
+                return_value=SimpleNamespace(
+                    returncode=0,
+                    stdout=generic_help,
+                    stderr=b"",
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                VhdxProbeError,
+                "displayed command help",
+            ):
+                runner._run_diskpart(("attach vdisk",))
+
+        self.assertIn("Exit code: 0", runner.diagnostic_details)
+        self.assertIn("CREATE", runner.diagnostic_details)
+
+    def test_nonzero_diskpart_create_is_a_probe_execution_failure(self) -> None:
+        runner = DiskPartVhdxRunner()
+        with (
+            patch(
+                "usb_array_manager.services.vhdx_probe.shutil.which",
+                return_value=r"C:\Windows\System32\diskpart.exe",
+            ),
+            patch(
+                "usb_array_manager.services.vhdx_probe.subprocess.run",
+                return_value=SimpleNamespace(
+                    returncode=1,
+                    stdout=b"",
+                    stderr=b"DiskPart has encountered an error.",
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(VhdxProbeError, "reported an error"):
+                runner._run_diskpart(
+                    ('create vdisk file="J:\\probe.vhdx" maximum=512 type=expandable',)
+                )
+
+        self.assertIn("Exit code: 1", runner.diagnostic_details)
+        self.assertIn(
+            "Stderr:\nDiskPart has encountered an error.",
+            runner.diagnostic_details,
+        )
+
+    def test_diskpart_text_error_fails_even_with_zero_exit_code(self) -> None:
+        runner = DiskPartVhdxRunner()
+        with (
+            patch(
+                "usb_array_manager.services.vhdx_probe.shutil.which",
+                return_value=r"C:\Windows\System32\diskpart.exe",
+            ),
+            patch(
+                "usb_array_manager.services.vhdx_probe.subprocess.run",
+                return_value=SimpleNamespace(
+                    returncode=0,
+                    stdout=b"Virtual Disk Service error: operation failed.",
+                    stderr=b"",
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(VhdxProbeError, "could not be completed"):
+                runner._run_diskpart(("attach vdisk",))
+
+        self.assertIn("Exit code: 0", runner.diagnostic_details)
+
+    def test_detach_uses_explicit_script_and_exit(self) -> None:
+        runner = DiskPartVhdxRunner()
+        observed: dict[str, object] = {}
+
+        def run(command, **_kwargs):
+            script_path = Path(command[2])
+            observed["command"] = command
+            observed["script"] = script_path.read_text(encoding="utf-8")
+            observed["script_path"] = script_path
+            return SimpleNamespace(returncode=0, stdout=b"detached", stderr=b"")
+
+        with (
+            patch(
+                "usb_array_manager.services.vhdx_probe.shutil.which",
+                return_value=r"C:\Windows\System32\diskpart.exe",
+            ),
+            patch(
+                "usb_array_manager.services.vhdx_probe.subprocess.run",
+                side_effect=run,
+            ),
+        ):
+            runner.detach(Path(r"J:\path\probe.vhdx"))
+
+        self.assertEqual(
+            observed["script"],
+            'select vdisk file="J:\\path\\probe.vhdx"\ndetach vdisk\nexit\n',
+        )
+        self.assertEqual(observed["command"][1], "/s")
+        self.assertFalse(observed["script_path"].exists())
 
     def test_winerror_740_is_classified_as_needing_administrator(self) -> None:
         runner = DiskPartVhdxRunner()
@@ -482,6 +666,218 @@ class DiskPartVhdxRunnerTests(unittest.TestCase):
         self.assertNotIn("CLIXML", cleaned)
         self.assertNotIn("_x000D_", cleaned)
         self.assertEqual(cleaned, "Storage inspection failed\r\nSee details")
+
+    def test_powershell_clixml_plaintext_prefix_is_preserved(self) -> None:
+        raw = (
+            '#< CLIXML\r\nGet-Disk failed: Invalid property\r\n'
+            '<Objs Version="1.1.0.1" '
+            'xmlns="http://schemas.microsoft.com/powershell/2004/04">'
+            '<Obj S="progress"><MS><PR N="Record">'
+            '<AV>Preparing modules for first use.</AV>'
+            "</PR></MS></Obj></Objs>"
+        ).encode()
+
+        cleaned = _clean_process_output(b"", raw)
+
+        self.assertEqual(cleaned, "Get-Disk failed: Invalid property")
+        self.assertNotIn("CLIXML", cleaned)
+        self.assertNotIn("Preparing modules", cleaned)
+
+    def test_storage_provider_failure_uses_win32_inventory_fallback(self) -> None:
+        diagnostics: list[str] = []
+        runner = DiskPartVhdxRunner(diagnostic_callback=diagnostics.append)
+        fallback = {5: self.disk(5, "USB")}
+        with (
+            patch.object(
+                runner,
+                "_enumerate_storage_disks",
+                side_effect=VhdxProbeError(
+                    "Windows storage inspection failed.",
+                    details=(
+                        "Get-Disk failed: Invalid property\n"
+                        "FullyQualifiedErrorId: HRESULT 0x80041031,Get-Disk"
+                    ),
+                ),
+            ) as storage_inventory,
+            patch.object(
+                runner,
+                "_enumerate_win32_disks",
+                return_value=fallback,
+            ) as win32_inventory,
+        ):
+            first = runner._enumerate_disks()
+            second = runner._enumerate_disks()
+
+        self.assertEqual(first, fallback)
+        self.assertEqual(second, fallback)
+        storage_inventory.assert_called_once()
+        self.assertEqual(win32_inventory.call_count, 2)
+        self.assertIn("Get-Disk failed: Invalid property", diagnostics[0])
+        self.assertIn("CanPool is unavailable", runner.storage_inspection_warning)
+
+    def test_fallback_still_attempts_post_attach_storage_query(self) -> None:
+        runner = DiskPartVhdxRunner()
+        runner._storage_provider_available = False
+        before = {0: self.disk(0, "SATA")}
+        virtual = replace(self.disk(42), can_pool=None)
+        enriched = replace(virtual, can_pool=True)
+        after = {0: self.disk(0, "SATA"), 42: virtual}
+        with (
+            patch.object(runner, "_enumerate_disks", return_value=after),
+            patch.object(
+                runner,
+                "_inspect_attached_storage_disk",
+                return_value=enriched,
+            ) as storage_query,
+        ):
+            detected = runner._identify_attached_disk(
+                Path("probe.vhdx"),
+                before,
+                "attached",
+                prepare_filesystem=False,
+            )
+
+        storage_query.assert_called_once_with(virtual)
+        self.assertIs(detected, enriched)
+
+    @staticmethod
+    def capability_json(*, can_pool: bool, provider_id: str = "42") -> str:
+        return json.dumps(
+            {
+                "DeviceId": provider_id,
+                "FriendlyName": "Microsoft Virtual Disk",
+                "UniqueId": "VHDX-STORAGE-42",
+                "ObjectId": "Storage Spaces PhysicalDisk:42 Virtual",
+                "BusType": "File Backed Virtual",
+                "MediaType": "Unspecified",
+                "CanPool": can_pool,
+                "HealthStatus": "Healthy",
+                "OperationalStatus": "OK",
+            }
+        )
+
+    def test_get_disk_failure_but_get_physical_disk_success(self) -> None:
+        diagnostics: list[str] = []
+        runner = DiskPartVhdxRunner(diagnostic_callback=diagnostics.append)
+        verified = replace(self.disk(42), can_pool=None)
+
+        def query(script: str) -> str:
+            if "Get-Disk -Number" in script:
+                raise VhdxProbeError(
+                    "Windows storage inspection failed.",
+                    details="Get-Disk -Number 42 failed: Invalid property",
+                )
+            if "$physicalDisks = @(Get-PhysicalDisk" in script:
+                return self.capability_json(can_pool=True)
+            raise VhdxProbeError("provider unavailable", details="provider unavailable")
+
+        with patch.object(runner, "_run_powershell", side_effect=query):
+            result = runner._inspect_attached_storage_disk(verified)
+
+        self.assertTrue(result.can_pool)
+        summary = diagnostics[-1]
+        self.assertIn("Get-Disk: FAILED", summary)
+        self.assertIn("Get-PhysicalDisk: READY", summary)
+        self.assertIn("CanPool: True", summary)
+
+    def test_get_disk_failure_but_direct_cim_success(self) -> None:
+        diagnostics: list[str] = []
+        runner = DiskPartVhdxRunner(diagnostic_callback=diagnostics.append)
+        verified = replace(self.disk(42), can_pool=None)
+
+        def query(script: str) -> str:
+            if "MSFT_PhysicalDisk" in script:
+                return self.capability_json(can_pool=False)
+            raise VhdxProbeError(
+                "Windows storage inspection failed.",
+                details="HRESULT 0x80041031 Invalid property",
+            )
+
+        with patch.object(runner, "_run_powershell", side_effect=query):
+            result = runner._inspect_attached_storage_disk(verified)
+
+        self.assertFalse(result.can_pool)
+        summary = diagnostics[-1]
+        self.assertIn("Get-Disk: FAILED", summary)
+        self.assertIn("MSFT_PhysicalDisk CIM: READY", summary)
+        self.assertIn("CanPool: False", summary)
+
+    def test_all_storage_capability_providers_unavailable_is_unknown(self) -> None:
+        diagnostics: list[str] = []
+        runner = DiskPartVhdxRunner(diagnostic_callback=diagnostics.append)
+        verified = replace(self.disk(42), can_pool=None)
+        with patch.object(
+            runner,
+            "_run_powershell",
+            side_effect=VhdxProbeError(
+                "Windows storage inspection failed.",
+                details="HRESULT 0x80041031 Invalid property",
+            ),
+        ):
+            result = runner._inspect_attached_storage_disk(verified)
+
+        self.assertIsNone(result.can_pool)
+        summary = diagnostics[-1]
+        self.assertIn("Get-PhysicalDisk: FAILED", summary)
+        self.assertIn("Primordial Storage Pool: FAILED", summary)
+        self.assertIn("MSFT_PhysicalDisk CIM: FAILED", summary)
+        self.assertIn("CanPool: UNKNOWN", summary)
+
+    def test_storage_candidate_must_match_verified_disk_not_array_position(self) -> None:
+        runner = DiskPartVhdxRunner()
+        verified = replace(self.disk(42), can_pool=None)
+        wrong = self.capability_json(can_pool=True, provider_id="7")
+
+        def query(script: str) -> str:
+            if "Get-Disk -Number" in script:
+                raise VhdxProbeError("Get-Disk failed", details="Get-Disk failed")
+            return wrong
+
+        with patch.object(runner, "_run_powershell", side_effect=query):
+            result = runner._inspect_attached_storage_disk(verified)
+
+        self.assertIsNone(result.can_pool)
+
+    def test_both_inventory_paths_fail_before_diskpart_or_vhdx_creation(self) -> None:
+        runner = DiskPartVhdxRunner()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch.object(
+                    runner,
+                    "_enumerate_storage_disks",
+                    side_effect=VhdxProbeError(
+                        "Windows storage inspection failed.",
+                        details="Get-Disk failed: Invalid property",
+                    ),
+                ),
+                patch.object(
+                    runner,
+                    "_enumerate_win32_disks",
+                    side_effect=VhdxProbeError(
+                        "Pre-probe disk inventory failed before any VHDX was created.",
+                        details="Win32_DiskDrive failed",
+                    ),
+                ),
+                patch.object(runner, "_run_diskpart") as diskpart,
+            ):
+                result = probe_vhdx_backend(
+                    device(),
+                    root=root,
+                    settings=VhdxProbeSettings(
+                        vhdx_size_bytes=1024,
+                        free_space_reserve_bytes=0,
+                    ),
+                    runner=runner,
+                    name_factory=lambda: "inventory-failure",
+                    elevation_checker=lambda: True,
+                )
+
+            self.assertEqual(result.status, PROBE_FAILED)
+            self.assertIn("Pre-probe disk inventory failed", result.explanation)
+            self.assertIn("Win32_DiskDrive failed", result.diagnostic_details)
+            diskpart.assert_not_called()
+            self.assertFalse((root / TEST_FOLDER_NAME).exists())
 
 class VhdxBackendAssessmentTests(unittest.TestCase):
     def test_successful_single_probe_enables_four_member_dry_run(self) -> None:
