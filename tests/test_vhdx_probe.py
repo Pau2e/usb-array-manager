@@ -60,16 +60,21 @@ def device(slot: int = 1, filesystem: str = "exFAT") -> StorageDevice:
 
 
 class FakeRunner:
-    def __init__(self, *, can_pool=True, attach_error=None, detach_error=None) -> None:
+    def __init__(self, *, can_pool=True, attach_error=None, detach_error=None,
+                 size_bytes=None, reasons=(), other_reason="") -> None:
         self.can_pool = can_pool
         self.attach_error = attach_error
         self.detach_error = detach_error
         self.created = False
         self.detached = False
         self.prepare_filesystem = False
+        self.size_bytes = size_bytes
+        self.reasons = reasons
+        self.other_reason = other_reason
 
     def create(self, path: Path, _size: int) -> None:
         self.created = True
+        self.created_size = _size
         path.write_bytes(b"temporary-vhdx")
 
     def attach(self, _path: Path, *, prepare_filesystem: bool) -> VhdxDiskInfo:
@@ -85,6 +90,9 @@ class FakeRunner:
             "OK",
             "Healthy",
             "V:\\" if prepare_filesystem else None,
+            size_bytes=self.size_bytes,
+            cannot_pool_reasons=self.reasons,
+            other_cannot_pool_reason_description=self.other_reason,
         )
 
     def detach(self, _path: Path) -> None:
@@ -133,12 +141,90 @@ class VhdxProbeTests(unittest.TestCase):
         self.assertEqual(result.cleanup_status, "Detached and temporary file deleted")
         self.assertFalse(Path(result.vhdx_path).exists())
 
-    def test_vhdx_not_poolable(self) -> None:
-        result = self.run_probe(FakeRunner(can_pool=False))
+    def test_ntfs_default_probe_uses_pool_eligibility_size(self) -> None:
+        runner = FakeRunner(size_bytes=8 * 1024**3)
+        result = probe_vhdx_backend(
+            device(filesystem="NTFS"), root=self.root, runner=runner,
+            elevation_checker=lambda: True,
+        )
+        self.assertEqual(runner.created_size, 8 * 1024**3)
+        self.assertEqual(result.status, SUPPORTED)
 
-        self.assertEqual(result.status, UNSUPPORTED)
+    def test_fat32_default_probe_uses_eight_gib(self) -> None:
+        runner = FakeRunner(size_bytes=8 * 1024**3)
+        result = probe_vhdx_backend(
+            device(filesystem="FAT32"), root=self.root, runner=runner,
+            elevation_checker=lambda: True,
+        )
+        self.assertEqual(runner.created_size, 8 * 1024**3)
+        self.assertEqual(result.status, SUPPORTED)
+
+    def test_mixed_filesystems_default_probe_uses_eight_gib(self) -> None:
+        runner = FakeRunner(size_bytes=8 * 1024**3)
+        mixed = replace(device(filesystem="FAT32"),
+                        drive_letters=("G:", "H:"),
+                        filesystem_types=("FAT32", "NTFS"))
+        result = probe_vhdx_backend(
+            mixed, root=self.root, runner=runner, elevation_checker=lambda: True,
+        )
+        self.assertEqual(runner.created_size, 8 * 1024**3)
+        self.assertEqual(result.status, SUPPORTED)
+
+    def test_unknown_and_exfat_filesystems_do_not_reduce_default_size(self) -> None:
+        for filesystems in ((), ("exFAT",)):
+            with self.subTest(filesystems=filesystems):
+                runner = FakeRunner(size_bytes=8 * 1024**3)
+                result = probe_vhdx_backend(
+                    replace(device(), filesystem_types=filesystems), root=self.root,
+                    runner=runner, elevation_checker=lambda: True,
+                )
+                self.assertEqual(runner.created_size, 8 * 1024**3)
+                self.assertEqual(result.status, SUPPORTED)
+
+    def test_default_probe_does_not_downgrade_when_eight_gib_will_not_fit(self) -> None:
+        runner = FakeRunner()
+        with patch("usb_array_manager.services.vhdx_probe.shutil.disk_usage",
+                   return_value=SimpleNamespace(free=1024**3)):
+            result = probe_vhdx_backend(
+                device(filesystem="FAT32"), root=self.root, runner=runner,
+                elevation_checker=lambda: True,
+            )
+        self.assertEqual(result.status, PROBE_FAILED)
+        self.assertFalse(runner.created)
+        self.assertIn("8704 MiB required", result.explanation)
+
+    def test_small_nonpoolable_probe_is_inconclusive(self) -> None:
+        result = self.run_probe(FakeRunner(can_pool=False, size_bytes=512 * 1024**2))
+
+        self.assertEqual(result.status, UNKNOWN)
+        self.assertIs(result.virtual_disk.can_pool, False)
         self.assertIn("CanPool=False", result.explanation)
+        self.assertIn("512 MiB", result.explanation)
+        self.assertIn("inconclusive", result.explanation)
         self.assertIsNone(result.leftover_path)
+
+    def test_insufficient_capacity_reason_is_inconclusive_and_preserved(self) -> None:
+        result = self.run_probe(FakeRunner(
+            can_pool=False, size_bytes=8 * 1024**3,
+            reasons=("Insufficient Capacity (7)",), other_reason="Provider capacity constraint",
+        ))
+        self.assertEqual(result.status, UNKNOWN)
+        self.assertIn("Insufficient Capacity (7)", result.explanation)
+        self.assertIn("Provider capacity constraint", result.explanation)
+        self.assertEqual(result.virtual_disk.size_bytes, 8 * 1024**3)
+
+    def test_large_rejected_probe_without_reason_is_unknown(self) -> None:
+        result = self.run_probe(FakeRunner(can_pool=False, size_bytes=8 * 1024**3))
+        self.assertEqual(result.status, UNKNOWN)
+        self.assertIn("did not report a reason", result.explanation)
+
+    def test_large_rejected_probe_reports_bounded_current_state(self) -> None:
+        result = self.run_probe(FakeRunner(
+            can_pool=False, size_bytes=8 * 1024**3, reasons=("Offline (6)",),
+        ))
+        self.assertEqual(result.status, UNSUPPORTED)
+        self.assertIn("tested disk in its current state", result.explanation)
+        self.assertIn("Offline (6)", result.virtual_disk.pool_rejection_details)
 
     def test_unknown_poolability_is_unknown(self) -> None:
         result = self.run_probe(FakeRunner(can_pool=None))
@@ -328,6 +414,15 @@ class VhdxProbeTests(unittest.TestCase):
 
 
 class DiskPartVhdxRunnerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Every test is a simulation, including newly added capability queries.
+        patcher = patch.object(
+            DiskPartVhdxRunner, "_run_powershell",
+            side_effect=VhdxProbeError("Mock provider unavailable"),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @staticmethod
     def disk(number: int, bus_type: str = "File Backed Virtual") -> VhdxDiskInfo:
         return VhdxDiskInfo(
@@ -338,6 +433,7 @@ class DiskPartVhdxRunnerTests(unittest.TestCase):
             True,
             "Online",
             "Healthy",
+            size_bytes=512 * 1024**2,
         )
 
     def test_diskpart_create_attach_detach_lifecycle(self) -> None:
@@ -399,6 +495,7 @@ class DiskPartVhdxRunnerTests(unittest.TestCase):
                     "_enumerate_disks",
                     side_effect=(before, after),
                 ) as enumerate_disks,
+                patch.object(runner, "_inspect_attached_storage_disk", return_value=virtual),
             ):
                 detected = runner.create_and_attach(
                     path,
@@ -640,6 +737,7 @@ SELECT      - Shifts the focus to an object.
         with (
             patch.object(runner, "_run_diskpart", return_value="attached"),
             patch.object(runner, "_enumerate_disks", side_effect=(before, after)),
+            patch.object(runner, "_inspect_attached_storage_disk", return_value=virtual),
             patch.object(
                 runner,
                 "_prepare_filesystem",
@@ -751,6 +849,7 @@ SELECT      - Shifts the focus to an object.
                 "BusType": "File Backed Virtual",
                 "MediaType": "Unspecified",
                 "CanPool": can_pool,
+                "Size": 512 * 1024**2,
                 "HealthStatus": "Healthy",
                 "OperationalStatus": "OK",
             }
@@ -838,6 +937,109 @@ SELECT      - Shifts the focus to an object.
 
         self.assertIsNone(result.can_pool)
 
+    def test_primary_inventory_false_never_accepts_same_number_usb_candidate(self) -> None:
+        runner = DiskPartVhdxRunner()
+        virtual = replace(self.disk(42), can_pool=False)
+        wrong = json.loads(self.capability_json(can_pool=False))
+        wrong["BusType"] = "USB"
+        # FriendlyName/ObjectId include "Virtual", so a name hint alone is unsafe.
+        with (
+            patch.object(runner, "_enumerate_disks", return_value={42: virtual}),
+            patch.object(runner, "_run_powershell", return_value=json.dumps(wrong)),
+        ):
+            result = runner._identify_attached_disk(
+                Path("probe.vhdx"), {}, "attached", prepare_filesystem=False,
+            )
+        self.assertIsNone(result.can_pool)
+        self.assertIn("IGNORED DeviceId='42'", runner.diagnostic_details)
+        self.assertIn("BusType='USB'", runner.diagnostic_details)
+
+    def test_matching_number_cannot_override_conflicting_storage_identity(self) -> None:
+        runner = DiskPartVhdxRunner()
+        verified = replace(self.disk(42), can_pool=None, storage_unique_id="EXPECTED-UID")
+        with patch.object(runner, "_run_powershell", return_value=self.capability_json(can_pool=True)):
+            result = runner._inspect_attached_storage_disk(verified)
+        self.assertIsNone(result.can_pool)
+
+    def test_matching_number_without_storage_identity_also_requires_size(self) -> None:
+        runner = DiskPartVhdxRunner()
+        verified = replace(self.disk(42), can_pool=None)
+        wrong = json.loads(self.capability_json(can_pool=True))
+        wrong["Size"] = 64 * 1024**3
+        with patch.object(runner, "_run_powershell", return_value=json.dumps(wrong)):
+            result = runner._inspect_attached_storage_disk(verified)
+        self.assertIsNone(result.can_pool)
+
+    def test_get_disk_enriches_rounded_win32_size_before_physical_matching(self) -> None:
+        runner = DiskPartVhdxRunner()
+        verified = replace(self.disk(42), can_pool=None,
+                           size_bytes=512 * 1024**2 - 1024**2, size_is_exact=False)
+        with patch.object(runner, "_run_powershell", return_value=self.capability_json(can_pool=True)):
+            result = runner._inspect_attached_storage_disk(verified)
+        self.assertTrue(result.can_pool)
+        self.assertTrue(result.size_is_exact)
+        self.assertEqual(result.size_bytes, 512 * 1024**2)
+
+    def test_rounded_win32_size_alone_cannot_prove_physical_identity(self) -> None:
+        runner = DiskPartVhdxRunner()
+        verified = replace(self.disk(42), can_pool=None, size_is_exact=False)
+        def query(script):
+            if "Get-Disk -Number" in script:
+                raise VhdxProbeError("Get-Disk unavailable")
+            return self.capability_json(can_pool=True)
+        with patch.object(runner, "_run_powershell", side_effect=query):
+            result = runner._inspect_attached_storage_disk(verified)
+        self.assertIsNone(result.can_pool)
+
+    def test_numeric_cim_bus_and_reasons_reach_result_and_diagnostics(self) -> None:
+        runner = DiskPartVhdxRunner()
+        verified = replace(self.disk(42), can_pool=None)
+        record = json.loads(self.capability_json(can_pool=False))
+        record.update({
+            "BusType": 15, "CannotPoolReason": [7, 32768],
+            "OtherCannotPoolReasonDescription": "Vendor capacity details",
+        })
+        with patch.object(runner, "_run_powershell", return_value=json.dumps(record)):
+            result = runner._inspect_attached_storage_disk(verified)
+        self.assertIs(result.can_pool, False)
+        self.assertEqual(result.size_bytes, 512 * 1024**2)
+        self.assertEqual(result.cannot_pool_reasons, (
+            "Insufficient Capacity (7)", "Unrecognized reason (32768)",
+        ))
+        self.assertEqual(result.other_cannot_pool_reason_description, "Vendor capacity details")
+        self.assertIn("UniqueId='VHDX-STORAGE-42'", runner.diagnostic_details)
+        self.assertIn("Insufficient Capacity (7)", runner.diagnostic_details)
+        self.assertIn("Vendor capacity details", runner.diagnostic_details)
+
+    def test_conflicting_provider_values_remain_unknown(self) -> None:
+        runner = DiskPartVhdxRunner()
+        verified = replace(self.disk(42), can_pool=None)
+        def query(script):
+            return self.capability_json(can_pool="MSFT_PhysicalDisk" not in script)
+        with patch.object(runner, "_run_powershell", side_effect=query):
+            result = runner._inspect_attached_storage_disk(verified)
+        self.assertIsNone(result.can_pool)
+        self.assertIn("conflicting values", runner.diagnostic_details)
+
+    def test_duplicate_matching_objects_remain_unknown_even_when_values_agree(self) -> None:
+        runner = DiskPartVhdxRunner()
+        verified = replace(self.disk(42), can_pool=None)
+        record = json.loads(self.capability_json(can_pool=True))
+        with patch.object(runner, "_run_powershell", return_value=json.dumps([record, record])):
+            result = runner._inspect_attached_storage_disk(verified)
+        self.assertIsNone(result.can_pool)
+        self.assertIn("identity is ambiguous", runner.diagnostic_details)
+
+    def test_empty_storage_inventory_uses_win32_fallback(self) -> None:
+        runner = DiskPartVhdxRunner()
+        fallback = {0: self.disk(0, "SATA")}
+        with (
+            patch.object(runner, "_enumerate_storage_disks", return_value={}),
+            patch.object(runner, "_enumerate_win32_disks", return_value=fallback),
+        ):
+            self.assertEqual(runner._enumerate_disks(), fallback)
+        self.assertIn("Get-Disk returned no disk objects", runner.diagnostic_details)
+
     def test_both_inventory_paths_fail_before_diskpart_or_vhdx_creation(self) -> None:
         runner = DiskPartVhdxRunner()
         with tempfile.TemporaryDirectory() as directory:
@@ -880,6 +1082,23 @@ SELECT      - Shifts the focus to an object.
             self.assertFalse((root / TEST_FOLDER_NAME).exists())
 
 class VhdxBackendAssessmentTests(unittest.TestCase):
+    def test_inconclusive_probe_keeps_production_planning_blocked(self) -> None:
+        backend = VhdxStorageSpacesBackend()
+        plan = SavedRaid10Plan(((1, 2), (3, 4)), "2026-10-10T10:00:00+00:00")
+        devices = [device(slot) for slot in range(1, 5)]
+        with tempfile.TemporaryDirectory() as directory:
+            result = probe_vhdx_backend(
+                devices[0], root=Path(directory),
+                settings=VhdxProbeSettings(vhdx_size_bytes=1024, free_space_reserve_bytes=0),
+                runner=FakeRunner(can_pool=False, size_bytes=512 * 1024**2),
+                elevation_checker=lambda: True,
+            )
+        backend.record_probe(result)
+        assessment = backend.assess(plan, devices)
+        self.assertEqual(assessment.status, UNKNOWN)
+        self.assertIn("inconclusive", assessment.explanation)
+        self.assertTrue(any("successfully" in item for item in assessment.requirements))
+
     def test_successful_single_probe_enables_four_member_dry_run(self) -> None:
         backend = VhdxStorageSpacesBackend()
         plan = SavedRaid10Plan(((1, 2), (3, 4)), "2026-10-10T10:00:00+00:00")

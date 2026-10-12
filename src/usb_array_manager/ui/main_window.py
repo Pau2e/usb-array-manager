@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from usb_array_manager import __version__
 from usb_array_manager.models.benchmark_result import BenchmarkResult
 from usb_array_manager.models.raid_backend import (
     NEEDS_ADMINISTRATOR,
@@ -193,7 +194,7 @@ class MainWindow(QMainWindow):
         self._raid_backend = windows_backend
         self._selected_backend_name = windows_backend.name
 
-        self.setWindowTitle("USB Array Manager 0.7.1 — VHDX backend evaluation")
+        self.setWindowTitle(f"USB Array Manager {__version__} — VHDX backend evaluation")
         self.setMinimumSize(1_050, 650)
         self.resize(1_350, 780)
 
@@ -616,7 +617,7 @@ class MainWindow(QMainWindow):
         warning = QMessageBox(self)
         warning.setIcon(QMessageBox.Icon.Warning)
         warning.setWindowTitle(f"VHDX {action} — Slot {slot}")
-        warning.setText("A temporary VHDX file will be written to this USB filesystem.")
+        warning.setText("A temporary 8 GiB expandable VHDX will be created on this USB filesystem.")
         warning.setInformativeText(
             "The file uses a unique name inside .usb-array-manager-vhdx-test. "
             "It will be attached, inspected, detached, and deleted. The physical USB "
@@ -645,7 +646,7 @@ class MainWindow(QMainWindow):
             lambda message: self._log("VHDX DiskPart", message)
         )
         self._vhdx_thread.finished.connect(self._vhdx_thread_finished)
-        self._log("VHDX probe", f"Started Slot {slot} {action}.")
+        self._log("VHDX probe", f"Started Slot {slot} {action}; VHDX size 8 GiB (expandable).")
         self._vhdx_thread.start()
 
     def _vhdx_probe_finished(self, result: VhdxProbeResult) -> None:

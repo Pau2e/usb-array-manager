@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from html import escape
 
+from usb_array_manager import __version__
+
 from PySide6.QtCore import QDateTime, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -177,7 +179,7 @@ class BackendDeploymentTab(QWidget):
         title = QLabel("RAID backend capability and deployment dry run")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
         safety = QLabel(
-            "Production deployment remains PREVIEW ONLY. Version 0.7.1 may create, "
+            f"Production deployment remains PREVIEW ONLY. Version {__version__} may create, "
             "attach, benchmark, detach, and delete one temporary test VHDX only."
         )
         safety.setStyleSheet("color: #b00020; font-weight: 700;")
@@ -193,19 +195,23 @@ class BackendDeploymentTab(QWidget):
         status_row = QHBoxLayout()
         status_row.addWidget(QLabel("Backend:"))
         status_row.addWidget(self.backend_selector)
+        status_row.addWidget(QLabel("Deployment assessment:"))
         status_row.addWidget(self.status)
         status_row.addWidget(self.explanation, 1)
 
         self.vhdx_panel = QGroupBox("Temporary VHDX capability probe")
         self.vhdx_slot = QComboBox()
-        self.probe_button = QPushButton("Probe VHDX Backend")
+        self.probe_button = QPushButton("Probe VHDX Backend (8 GiB)")
         self.performance_button = QPushButton("Run VHDX Performance Test")
         self.performance_button.setEnabled(False)
         self.vhdx_path = QLabel("—")
         self.vhdx_attach = QLabel("Not run")
         self.vhdx_identity = QLabel("—")
         self.vhdx_can_pool = QLabel("Unknown")
+        self.vhdx_size = QLabel("Unknown")
+        self.vhdx_pool_reason = QLabel("Not run")
         self.vhdx_compatibility = QLabel("UNKNOWN")
+        self.vhdx_probe_explanation = QLabel("Not run")
         self.vhdx_benchmark = QLabel("Not run")
         self.vhdx_overhead = QLabel("Not measured")
         self.vhdx_cleanup = QLabel("Not run")
@@ -213,6 +219,8 @@ class BackendDeploymentTab(QWidget):
             self.vhdx_path,
             self.vhdx_attach,
             self.vhdx_identity,
+            self.vhdx_pool_reason,
+            self.vhdx_probe_explanation,
             self.vhdx_benchmark,
             self.vhdx_overhead,
             self.vhdx_cleanup,
@@ -223,12 +231,21 @@ class BackendDeploymentTab(QWidget):
         controls.addWidget(self.probe_button)
         controls.addWidget(self.performance_button)
         form = QFormLayout(self.vhdx_panel)
+        probe_scope = QLabel(
+            "Probe size: 8 GiB expandable VHDX on the selected filesystem. "
+            "The capability probe inspects this temporary disk, then detaches and deletes it."
+        )
+        probe_scope.setWordWrap(True)
+        form.addRow(probe_scope)
         form.addRow("Selected physical USB slot", controls)
         form.addRow("Temporary VHDX path", self.vhdx_path)
         form.addRow("Attach status", self.vhdx_attach)
         form.addRow("Virtual disk identity", self.vhdx_identity)
+        form.addRow("Virtual disk size", self.vhdx_size)
         form.addRow("CanPool", self.vhdx_can_pool)
-        form.addRow("Backend compatibility", self.vhdx_compatibility)
+        form.addRow("Windows rejection reason", self.vhdx_pool_reason)
+        form.addRow("Probe assessment", self.vhdx_compatibility)
+        form.addRow("Probe details", self.vhdx_probe_explanation)
         form.addRow("Direct vs VHDX benchmark", self.vhdx_benchmark)
         form.addRow("Measured overhead", self.vhdx_overhead)
         form.addRow("Cleanup status", self.vhdx_cleanup)
@@ -322,6 +339,15 @@ class BackendDeploymentTab(QWidget):
         self.vhdx_attach.setText(result.attach_status)
         disk = result.virtual_disk
         self.vhdx_identity.setText(disk.identity if disk else "—")
+        self.vhdx_size.setText(
+            (f"{disk.size_bytes / 1024**2:g} MiB"
+             + (" (approximate)" if not disk.size_is_exact else ""))
+            if disk and disk.size_bytes else "Unknown"
+        )
+        self.vhdx_pool_reason.setText(
+            disk.pool_rejection_details if disk and disk.can_pool is False else "—"
+        )
+        self.vhdx_probe_explanation.setText(result.explanation)
         self.vhdx_can_pool.setText(
             "Yes" if disk and disk.can_pool is True
             else "No" if disk and disk.can_pool is False

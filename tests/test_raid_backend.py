@@ -56,7 +56,7 @@ class WindowsStorageSpacesBackendTests(unittest.TestCase):
         self.assertEqual(assessment.status, SUPPORTED)
         self.assertEqual(len(assessment.drives), 4)
         self.assertIn("PREVIEW ONLY — NOT EXECUTED", assessment.dry_run_text)
-        self.assertIn("No production execution API exists in v0.7.1", assessment.dry_run_text)
+        self.assertIn("No production execution API exists", assessment.dry_run_text)
         self.assertFalse(hasattr(self.backend, "execute"))
 
     def test_existing_filesystem_is_partially_supported(self) -> None:

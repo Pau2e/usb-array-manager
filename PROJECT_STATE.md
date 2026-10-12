@@ -2,7 +2,25 @@
 
 ## Current version
 
-**v0.7.1**
+**v0.7.2**
+
+The Probe VHDX Backend button now always uses an 8 GiB expandable disk on the
+selected filesystem, including FAT32, mixed, or unknown filesystems. It does
+not fall back to 512 MiB based on the filesystem. The capability-only probe
+inspects the blank virtual disk without allocating/filling its logical capacity.
+The existing free-space preflight still requires 8 GiB plus a 512 MiB reserve.
+Capability is accepted only from an
+independently matched file-backed physical-disk record. The UI and logs expose
+disk size and Windows rejection details. A negative undersized or
+capacity-constrained probe is inconclusive, rather than evidence that every
+VHDX-backed backend is unsupported.
+
+The affected Windows 10 22H2 Storage Management path was repaired by restoring
+the missing installed `mispace.mof` registration/classes after backing up WMI.
+Live NTFS tests then returned `CanPool=False / Insufficient Capacity` for a
+512 MiB expandable VHDX and `CanPool=True` for an 8 GiB expandable VHDX. Both were
+detached/deleted, and disk, partition, and filesystem inventories were unchanged.
+No actual pool or production array has been created.
 
 The current work adds an explicitly initiated, temporary VHDX-backed Storage
 Spaces capability and performance probe. Production deployment remains dry-run
@@ -472,7 +490,7 @@ deletes it. No feature writes raw sectors or changes storage configuration.
 
 ## Exact next recommended milestone
 
-### v0.7.1.x — VHDX probe hardening
+### Next — USB-hosted VHDX validation
 
 Validate temporary VHDX capability reporting across more Windows editions, USB
 filesystems, DiskPart behavior, and Storage cmdlet versions. Do not add production RAID execution

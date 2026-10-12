@@ -168,14 +168,16 @@ Version 0.6 has no RAID execution method and no Create RAID button. Its addition
 Windows queries use only read-only inventory commands. It never initializes,
 clears, partitions, formats, pools, mounts, unmounts, or otherwise modifies a disk.
 
-## Version 0.7.1 VHDX-backed Storage Spaces evaluation
+## Version 0.7.2 VHDX-backed Storage Spaces evaluation
 
 - Adds `VHDX-backed Storage Spaces` through the existing `RaidBackend` interface
 - Lets the user select one mounted logical USB slot for an explicit temporary probe
-- Creates a uniquely named 512 MiB dynamic VHDX only inside
-  `.usb-array-manager-vhdx-test` on that selected filesystem
+- Creates a uniquely named dynamic VHDX only inside
+  `.usb-array-manager-vhdx-test` on that selected filesystem, with a logical
+  size of 8 GiB for every filesystem, including FAT32; the capability-only
+  probe does not allocate or fill the complete 8 GiB
 - Attaches the temporary VHDX and reports its virtual disk identity, BusType,
-  MediaType, CanPool, operational status, health, and Storage Spaces compatibility
+  size, MediaType, CanPool, rejection reason, operational status, and health
 - Always attempts detach and deletion; cleanup failures prominently report the
   exact leftover path and never continue silently
 - Optionally compares direct-filesystem and VHDX-filesystem sequential read,
@@ -209,6 +211,20 @@ pipeline, and direct `MSFT_PhysicalDisk` CIM. A provider object is accepted only
 when its identifiers and virtual-disk attributes safely match the verified new
 disk. If none can expose a match, `CanPool` remains unknown rather than being
 guessed, and the main UI directs the user to Logs / Details.
+
+Every attached VHDX is independently correlated with a file-backed physical-disk
+record before accepting `CanPool`; a disk number alone cannot override a
+conflicting Storage UniqueId or bus type. Logs include each candidate's identity,
+size, `CannotPoolReason`, and `OtherCannotPoolReasonDescription`. A negative
+undersized or capacity-constrained probe is reported as inconclusive (`UNKNOWN`)
+while preserving Windows' actual `CanPool=False` value. Other rejections apply
+to the tested configuration and do not establish universal VHDX incompatibility.
+
+On the investigated Windows 10 22H2 machine, a temporary 512 MiB expandable VHDX
+on NTFS reported `Insufficient Capacity`, while an 8 GiB expandable VHDX reported
+`CanPool=True`. Both were verified, detached, and deleted. This confirms
+eligibility for that configuration; it does not validate a four-USB production
+array or measure its performance.
 
 DiskPart VHDX operations require the application to be started as Administrator.
 The elevation preflight runs before creating the test folder or VHDX. A
@@ -258,5 +274,5 @@ py -3.12 -m unittest discover -s tests -v
 Inventory and slot detection are read-only. Version 0.3 writes only a temporary
 benchmark file after explicit confirmation. It does not format, partition,
 initialize, mount, unmount, erase, or access raw physical storage devices. Version
-0.7.1 may initialize and format only a newly created disposable virtual disk inside
+0.7.2 may initialize and format only a newly created disposable virtual disk inside
 its uniquely named temporary VHDX, after explicit confirmation.

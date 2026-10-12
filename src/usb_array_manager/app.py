@@ -4,12 +4,14 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
+from usb_array_manager import __version__
 from usb_array_manager.ui.main_window import MainWindow
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("USB Array Manager")
+    app.setApplicationVersion(__version__)
 
     window = MainWindow()
     window.show()

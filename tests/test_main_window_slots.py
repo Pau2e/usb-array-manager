@@ -131,6 +131,7 @@ class MainWindowSlotTests(unittest.TestCase):
             )
             application.processEvents()
             self.assertFalse(window._backend_tab.vhdx_panel.isHidden())
+            self.assertIn("8 GiB", window._backend_tab.probe_button.text())
             self.assertEqual(window._backend_tab.vhdx_slot.count(), 4)
             self.assertFalse(window._backend_tab.performance_button.isEnabled())
             selected_slot = window._backend_tab.vhdx_slot.currentData()

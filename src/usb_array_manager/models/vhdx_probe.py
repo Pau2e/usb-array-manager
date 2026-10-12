@@ -13,6 +13,19 @@ class VhdxDiskInfo:
     operational_status: str
     health_status: str
     volume_root: str | None = None
+    size_bytes: int | None = None
+    cannot_pool_reasons: tuple[str, ...] = ()
+    other_cannot_pool_reason_description: str = ""
+    storage_unique_id: str = ""
+    size_is_exact: bool = True
+
+    @property
+    def pool_rejection_details(self) -> str:
+        if self.can_pool is not False:
+            return ""
+        return "; ".join(
+            (*self.cannot_pool_reasons, self.other_cannot_pool_reason_description)
+        ).strip("; ") or "Windows did not report a reason."
 
 
 @dataclass(frozen=True, slots=True)

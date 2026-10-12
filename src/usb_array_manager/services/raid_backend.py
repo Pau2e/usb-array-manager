@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import Counter
 
+from usb_array_manager import __version__
 from usb_array_manager.models.raid_backend import (
     NEEDS_ADMINISTRATOR,
     PARTIALLY_SUPPORTED,
@@ -404,7 +405,7 @@ def _vhdx_dry_run_preview(
             "- CanPool=True and healthy status for every virtual disk.",
             "- A Storage Spaces pool and mirrored virtual-disk layout built only from those VHDX disks.",
             "",
-            "These are planning notes only. No Create RAID action exists in v0.7.1.",
+            f"These are planning notes only. No Create RAID action exists in v{__version__}.",
         )
     )
     return "\n".join(lines) + "\n"
@@ -545,7 +546,7 @@ def _dry_run_preview(
             "# FUTURE DESTRUCTIVE: New-VirtualDisk with mirrored resiliency and validated columns.",
             "# FUTURE DESTRUCTIVE: Initialize-Disk, New-Partition, and Format-Volume.",
             "",
-            "These lines are documentation only. No production execution API exists in v0.7.1.",
+            f"These lines are documentation only. No production execution API exists in v{__version__}.",
         )
     )
     return "\n".join(lines) + "\n"

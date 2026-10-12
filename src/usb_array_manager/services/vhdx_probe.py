@@ -13,7 +13,7 @@ import threading
 import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,15 @@ from usb_array_manager.models.vhdx_probe import (
 from usb_array_manager.services.benchmark import BenchmarkSettings, run_benchmark
 
 MEBIBYTE = 1024 * 1024
+# A conservative test floor, not a claim that every Windows version accepts VHDX.
+MIN_ELIGIBILITY_PROBE_BYTES = 4 * 1024**3
+ELIGIBILITY_PROBE_BYTES = 8 * 1024**3
+_CANNOT_POOL_REASONS = {
+    0: "Unknown", 1: "Other", 2: "In a Pool", 3: "Not Healthy",
+    4: "Removable Media", 5: "In Use by Cluster", 6: "Offline",
+    7: "Insufficient Capacity", 8: "Spare Disk", 9: "Reserved by subsystem",
+    10: "Starting",
+}
 TEST_FOLDER_NAME = ".usb-array-manager-vhdx-test"
 ADMINISTRATOR_MESSAGE = (
     "VHDX testing requires Administrator privileges. Restart USB Array Manager "
@@ -59,7 +68,7 @@ class VhdxProbeError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class VhdxProbeSettings:
-    vhdx_size_bytes: int = 512 * MEBIBYTE
+    vhdx_size_bytes: int = ELIGIBILITY_PROBE_BYTES
     free_space_reserve_bytes: int = 512 * MEBIBYTE
     benchmark_settings: BenchmarkSettings = field(
         default_factory=lambda: BenchmarkSettings(
@@ -85,6 +94,9 @@ class _StoragePhysicalDisk:
     can_pool: bool | None
     health_status: str
     operational_status: str
+    size_bytes: int | None = None
+    cannot_pool_reasons: tuple[str, ...] = ()
+    other_cannot_pool_reason_description: str = ""
 
 
 class DiskPartVhdxRunner:
@@ -199,8 +211,12 @@ class DiskPartVhdxRunner:
                     f"identity={disk.identity}."
                 ),
             )
-        if disk.can_pool is None:
-            disk = self._inspect_attached_storage_disk(disk)
+        # Inventory identifies the newly attached disk; only an independently
+        # matched physical-disk record may supply its Storage Spaces capability.
+        disk = self._inspect_attached_storage_disk(replace(
+            disk, can_pool=None, cannot_pool_reasons=(),
+            other_cannot_pool_reason_description="",
+        ))
         if prepare_filesystem:
             if disk.can_pool is not True:
                 raise VhdxProbeError(
@@ -208,22 +224,14 @@ class DiskPartVhdxRunner:
                     "probe with CanPool=True."
                 )
             volume_root = self._prepare_filesystem(disk)
-            disk = VhdxDiskInfo(
-                disk.disk_number,
-                disk.identity,
-                disk.bus_type,
-                disk.media_type,
-                disk.can_pool,
-                disk.operational_status,
-                disk.health_status,
-                volume_root,
-            )
+            disk = replace(disk, volume_root=volume_root)
         return disk
 
     def _inspect_attached_storage_disk(self, disk: VhdxDiskInfo) -> VhdxDiskInfo:
         diagnostics = [
-            f"Win32_DiskDrive: READY — Disk {disk.disk_number} verified as "
-            "the single newly attached Microsoft virtual disk."
+            f"Disk inventory: Disk {disk.disk_number} verified as the single newly "
+            f"attached file-backed virtual disk; identity={disk.identity}; "
+            f"size={disk.size_bytes!r} bytes (exact={disk.size_is_exact})."
         ]
         get_disk_script = f"""
 $disk = Get-Disk -Number {disk.disk_number} -ErrorAction Stop
@@ -233,6 +241,7 @@ $disk = Get-Disk -Number {disk.disk_number} -ErrorAction Stop
     UniqueId = [string]$disk.UniqueId
     ObjectId = [string]$disk.ObjectId
     BusType = [string]$disk.BusType
+    Size = $disk.Size
     MediaType = ''
     CanPool = $null
     HealthStatus = 'Unknown'
@@ -273,18 +282,45 @@ $disk = Get-Disk -Number {disk.disk_number} -ErrorAction Stop
             diagnostics.append(f"{provider}: READY — {len(rows)} object(s)")
             if supplies_can_pool:
                 candidates.extend(rows)
+            elif len(rows) == 1:
+                anchor = rows[0]
+                if (
+                    anchor.device_id == str(disk.disk_number)
+                    and _is_file_backed_virtual(anchor.bus_type)
+                    and (not disk.size_is_exact or disk.size_bytes is None
+                         or anchor.size_bytes == disk.size_bytes)
+                    and (not disk.storage_unique_id or
+                         _identity_token(anchor.unique_id) == _identity_token(disk.storage_unique_id))
+                ):
+                    disk = replace(
+                        disk, identity=anchor.unique_id or disk.identity,
+                        storage_unique_id=anchor.unique_id or disk.storage_unique_id,
+                        size_bytes=anchor.size_bytes or disk.size_bytes,
+                        size_is_exact=anchor.size_bytes is not None,
+                    )
 
         matches = [
             candidate
             for candidate in candidates
             if _matches_verified_virtual_disk(disk, candidate)
         ]
+        for candidate in candidates:
+            diagnostics.append(
+                f"{candidate.provider}: "
+                f"{'MATCH' if candidate in matches else 'IGNORED'} "
+                f"DeviceId={candidate.device_id!r}; UniqueId={candidate.unique_id!r}; "
+                f"ObjectId={candidate.object_id!r}; BusType={candidate.bus_type!r}; "
+                f"Size={candidate.size_bytes!r}; CanPool={candidate.can_pool!r}; "
+                f"CannotPoolReason={candidate.cannot_pool_reasons!r}; "
+                f"OtherCannotPoolReasonDescription={candidate.other_cannot_pool_reason_description!r}"
+            )
         result, resolution = _resolve_storage_match(disk, matches)
         if result.can_pool is True:
             diagnostics.append("CanPool: True")
             self.storage_inspection_warning = ""
         elif result.can_pool is False:
             diagnostics.append("CanPool: False")
+            diagnostics.append(f"Rejection details: {result.pool_rejection_details}")
             self.storage_inspection_warning = ""
         elif matches:
             diagnostics.append(f"CanPool: UNKNOWN — {resolution}")
@@ -393,12 +429,15 @@ $disk = Get-Disk -Number {disk.disk_number} -ErrorAction Stop
         if self._storage_provider_available is not False:
             try:
                 disks = self._enumerate_storage_disks()
+                if not disks:
+                    raise VhdxProbeError("Get-Disk returned no disk objects.")
             except VhdxProbeError as error:
                 self._storage_provider_available = False
                 decoded = error.details or str(error)
                 self.storage_inspection_warning = (
-                    "The Windows Storage provider failed while querying Get-Disk/"
-                    "Get-PhysicalDisk; CanPool is unavailable. See Logs / Details."
+                    "The Windows Storage provider could not enumerate disks; "
+                    "CanPool is unavailable until a physical-disk object can be matched. "
+                    "See Logs / Details."
                 )
                 self._record_diagnostic(
                     "Primary Windows Storage inspection failed; using the read-only "
@@ -417,26 +456,19 @@ $disks = try {
 } catch {
     throw "Get-Disk failed: $($_.Exception.Message) [FullyQualifiedErrorId: $($_.FullyQualifiedErrorId)]"
 }
-$physicalDisks = try {
-    @(Get-PhysicalDisk -ErrorAction Stop)
-} catch {
-    throw "Get-PhysicalDisk failed: $($_.Exception.Message) [FullyQualifiedErrorId: $($_.FullyQualifiedErrorId)]"
-}
 @(
     $disks | ForEach-Object {
         $disk = $_
-        $physical = @($physicalDisks | Where-Object {
-            ([string]$_.DeviceId -eq [string]$disk.Number) -or
-            ($disk.UniqueId -and ([string]$_.UniqueId -eq [string]$disk.UniqueId))
-        }) | Select-Object -First 1
         [PSCustomObject]@{
             disk_number = $disk.Number
             identity = $disk.UniqueId
+            storage_unique_id = $disk.UniqueId
+            size_bytes = $disk.Size
             bus_type = [string]$disk.BusType
-            media_type = if ($physical) { [string]$physical.MediaType } else { 'Unspecified' }
-            can_pool = if ($physical) { $physical.CanPool } else { $null }
-            operational_status = if ($physical) { [string]$physical.OperationalStatus } else { [string]$disk.OperationalStatus }
-            health_status = if ($physical) { [string]$physical.HealthStatus } else { 'Unknown' }
+            media_type = 'Unspecified'
+            can_pool = $null
+            operational_status = [string]$disk.OperationalStatus
+            health_status = [string]$disk.HealthStatus
         }
     }
 ) | ConvertTo-Json -Depth 3 -Compress
@@ -457,6 +489,8 @@ $physicalDisks = try {
             [PSCustomObject]@{
                 disk_number = [int]$disk.Index
                 identity = if ($pnpId) { $pnpId } else { [string]$disk.DeviceID }
+                size_bytes = $disk.Size
+                size_is_exact = $false
                 bus_type = if ($isMicrosoftVirtual) { 'File Backed Virtual' } else { [string]$disk.InterfaceType }
                 media_type = [string]$disk.MediaType
                 can_pool = $null
@@ -786,13 +820,15 @@ def probe_vhdx_backend(
         )
     if disk_info is None:
         return _failure(slot, source_identity, str(path), filesystem, "No virtual disk information was returned.", attach_status, cleanup_status)
-    if disk_info.can_pool is not True:
-        status = UNKNOWN if disk_info.can_pool is None else UNSUPPORTED
+    if disk_info.can_pool is False:
+        status, explanation = _rejected_probe_assessment(
+            disk_info, active_settings.vhdx_size_bytes
+        )
+    elif disk_info.can_pool is None:
+        status = UNKNOWN
         explanation = (
             getattr(active_runner, "storage_inspection_warning", "")
             or "Windows did not report Storage Spaces CanPool for the temporary virtual disk."
-            if disk_info.can_pool is None
-            else "Windows Storage Spaces reported CanPool=False for the temporary virtual disk."
         )
     else:
         status = SUPPORTED
@@ -891,6 +927,9 @@ $physicalDisks = {source_expression}
             BusType = [string]$_.BusType
             MediaType = [string]$_.MediaType
             CanPool = $_.CanPool
+            Size = $_.Size
+            CannotPoolReason = @($_.CannotPoolReason | ForEach-Object {{ [string]$_ }})
+            OtherCannotPoolReasonDescription = [string]$_.OtherCannotPoolReasonDescription
             HealthStatus = [string]$_.HealthStatus
             OperationalStatus = [string]$_.OperationalStatus
         }}
@@ -929,6 +968,11 @@ def _storage_physical_disks(
                 bus_type=str(record.get("BusType") or "Unknown"),
                 media_type=str(record.get("MediaType") or "Unknown"),
                 can_pool=_optional_bool(record.get("CanPool")),
+                size_bytes=_positive_size(record.get("Size")),
+                cannot_pool_reasons=_pool_reasons(record.get("CannotPoolReason")),
+                other_cannot_pool_reason_description=str(
+                    record.get("OtherCannotPoolReasonDescription") or ""
+                ),
                 health_status=str(record.get("HealthStatus") or "Unknown"),
                 operational_status=str(
                     record.get("OperationalStatus") or "Unknown"
@@ -943,33 +987,31 @@ def _matches_verified_virtual_disk(
     candidate: _StoragePhysicalDisk,
 ) -> bool:
     device_number_match = candidate.device_id.strip() == str(disk.disk_number)
-    virtual_hint = (
-        candidate.bus_type.casefold() == "file backed virtual"
-        or "virtual" in candidate.friendly_name.casefold()
-        or "virtual" in candidate.object_id.casefold()
+    if not _is_file_backed_virtual(candidate.bus_type):
+        return False
+    if disk.size_is_exact and disk.size_bytes is not None and candidate.size_bytes is not None:
+        if disk.size_bytes != candidate.size_bytes:
+            return False
+    identity = _identity_token(disk.storage_unique_id)
+    candidate_identity = _identity_token(candidate.unique_id)
+    if identity and candidate_identity:
+        return identity == candidate_identity
+    # Legacy Win32 identity is a PnP path, not Storage UniqueId. Require both
+    # disk number and observed size when no comparable Storage identity exists.
+    return (
+        device_number_match and disk.size_is_exact and disk.size_bytes is not None
+        and disk.size_bytes == candidate.size_bytes
     )
-    identity = _identity_token(disk.identity)
-    candidate_identities = tuple(
-        token
-        for token in (
-            _identity_token(candidate.unique_id),
-            _identity_token(candidate.object_id),
-        )
-        if token
-    )
-    identity_match = bool(identity) and any(
-        identity == token
-        or (len(identity) >= 12 and identity in token)
-        or (len(token) >= 12 and token in identity)
-        for token in candidate_identities
-    )
-    return virtual_hint and (device_number_match or identity_match)
 
 
 def _resolve_storage_match(
     disk: VhdxDiskInfo,
     matches: list[_StoragePhysicalDisk],
 ) -> tuple[VhdxDiskInfo, str]:
+    identities = {_identity_token(item.unique_id) for item in matches if item.unique_id}
+    providers = [item.provider for item in matches]
+    if len(identities) > 1 or len(providers) != len(set(providers)):
+        return disk, "multiple physical-disk objects matched; identity is ambiguous"
     values = {candidate.can_pool for candidate in matches if candidate.can_pool is not None}
     if len(values) > 1:
         return disk, "matching providers returned conflicting values"
@@ -993,6 +1035,17 @@ def _resolve_storage_match(
         operational_status=selected.operational_status or disk.operational_status,
         health_status=selected.health_status or disk.health_status,
         volume_root=disk.volume_root,
+        size_bytes=selected.size_bytes or disk.size_bytes,
+        cannot_pool_reasons=tuple(dict.fromkeys(
+            reason for candidate in matches for reason in candidate.cannot_pool_reasons
+            if candidate.can_pool is False
+        )),
+        other_cannot_pool_reason_description="; ".join(dict.fromkeys(
+            candidate.other_cannot_pool_reason_description for candidate in matches
+            if candidate.can_pool is False and candidate.other_cannot_pool_reason_description
+        )),
+        storage_unique_id=disk.storage_unique_id or selected.unique_id,
+        size_is_exact=selected.size_bytes is not None or disk.size_is_exact,
     )
     return resolved, (
         "matched provider object has no CanPool value"
@@ -1002,7 +1055,62 @@ def _resolve_storage_match(
 
 
 def _identity_token(value: str) -> str:
-    return re.sub(r"[^0-9a-z]", "", value.casefold())
+    return value.strip().casefold()
+
+
+def _is_file_backed_virtual(value: str) -> bool:
+    return value.strip().casefold() in {"file backed virtual", "15"}
+
+
+def _positive_size(value: Any) -> int | None:
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return None
+    return size if size > 0 else None
+
+
+def _pool_reasons(value: Any) -> tuple[str, ...]:
+    values = value if isinstance(value, list) else [value]
+    reasons = []
+    for item in values:
+        if item is None or not str(item).strip():
+            continue
+        text = str(item).strip()
+        if text.isdigit():
+            code = int(text)
+            text = f"{_CANNOT_POOL_REASONS.get(code, 'Unrecognized reason')} ({code})"
+        reasons.append(text)
+    return tuple(dict.fromkeys(reasons))
+
+
+def _rejected_probe_assessment(disk: VhdxDiskInfo, requested_size: int) -> tuple[str, str]:
+    size = disk.size_bytes or requested_size
+    reason = disk.pool_rejection_details
+    summary = (
+        f"Windows reported CanPool=False for this {size / MEBIBYTE:g} MiB "
+        f"temporary VHDX. {reason} "
+    )
+    insufficient = any("insufficient capacity" in item.casefold()
+                       for item in disk.cannot_pool_reasons)
+    if size < MIN_ELIGIBILITY_PROBE_BYTES:
+        return UNKNOWN, summary + (
+            "This size-limited probe is inconclusive for larger VHDX files; "
+            "a separate 8 GiB test on NTFS is needed to assess their eligibility."
+        )
+    if insufficient:
+        return UNKNOWN, summary + (
+            "This capacity-related rejection is inconclusive for other VHDX "
+            "configurations; inspect the required capacity and allocation before retrying."
+        )
+    if not disk.cannot_pool_reasons or all(
+        item.casefold() in {"unknown", "unknown (0)"} for item in disk.cannot_pool_reasons
+    ):
+        return UNKNOWN, summary + "The rejection reason must be established before judging backend support."
+    return UNSUPPORTED, summary + (
+        "This result applies to the tested disk in its current state; "
+        "it does not establish that every VHDX configuration is unsupported."
+    )
 
 
 def _first_diagnostic_line(value: str) -> str:
@@ -1068,6 +1176,9 @@ def _disk_info_from_record(record: Mapping[str, Any]) -> VhdxDiskInfo:
         operational_status=str(record.get("operational_status") or "Unknown"),
         health_status=str(record.get("health_status") or "Unknown"),
         volume_root=str(record["volume_root"]) if record.get("volume_root") else None,
+        size_bytes=_positive_size(record.get("size_bytes")),
+        storage_unique_id=str(record.get("storage_unique_id") or ""),
+        size_is_exact=record.get("size_is_exact") is not False,
     )
 
 
