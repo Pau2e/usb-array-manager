@@ -19,6 +19,8 @@ class BenchmarkResult:
     measurement_method_version: int = 2
     random_4k_read_iops: float | None = None
     random_4k_write_iops: float | None = None
+    run_count: int = 1
+    individual_runs: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -48,5 +50,11 @@ class BenchmarkResult:
                 float(data["random_4k_write_iops"])
                 if data.get("random_4k_write_iops") is not None
                 else None
+            ),
+            run_count=max(1, int(data.get("run_count", 1))),
+            individual_runs=tuple(
+                dict(item)
+                for item in data.get("individual_runs", ())
+                if isinstance(item, dict)
             ),
         )

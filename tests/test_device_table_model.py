@@ -138,7 +138,8 @@ class DeviceTableModelTests(unittest.TestCase):
                 Qt.ItemDataRole.ToolTipRole,
             ),
         )
-        self.assertEqual(benchmarks.columnCount(), 8)
+        self.assertEqual(benchmarks.columnCount(), 9)
+        self.assertEqual(benchmarks.data(benchmarks.index(0, 7)), "1")
         self.assertEqual(benchmarks.data(benchmarks.index(0, 4)), "35.8")
         displayed_timestamp = benchmarks.data(benchmarks.index(0, 6))
         self.assertNotIn("2026-10-09T", displayed_timestamp)

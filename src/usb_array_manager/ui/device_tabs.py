@@ -4,7 +4,7 @@ from html import escape
 
 from usb_array_manager import __version__
 
-from PySide6.QtCore import QDateTime, Signal
+from PySide6.QtCore import QDateTime, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -16,10 +16,13 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTableView,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -27,7 +30,10 @@ from PySide6.QtWidgets import (
 
 from usb_array_manager.models.raid_backend import SUPPORTED, BackendAssessment
 from usb_array_manager.models.storage_device import StorageDevice
-from usb_array_manager.models.vhdx_probe import VhdxProbeResult
+from usb_array_manager.models.vhdx_probe import (
+    VhdxBenchmarkComparison,
+    VhdxProbeResult,
+)
 from usb_array_manager.ui.device_table_model import (
     BenchmarkTableModel,
     OverviewTableModel,
@@ -85,6 +91,8 @@ class OverviewTab(QWidget):
 
 
 class BenchmarksTab(QWidget):
+    benchmark_all_requested = Signal(int)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.model = BenchmarkTableModel()
@@ -101,7 +109,8 @@ class BenchmarksTab(QWidget):
             4: 135,
             5: 110,
             6: 185,
-            7: 155,
+            7: 65,
+            8: 155,
         }.items():
             self.table.setColumnWidth(column, width)
         self.status = QLabel("Choose an assigned, connected slot to benchmark.")
@@ -111,6 +120,12 @@ class BenchmarksTab(QWidget):
         self.progress.setVisible(False)
         self.cancel_button = QPushButton("Cancel benchmark")
         self.cancel_button.setVisible(False)
+        self.batch_runs = QComboBox()
+        self.batch_runs.addItems(("1", "3", "5"))
+        self.benchmark_all_button = QPushButton("Benchmark All")
+        self.benchmark_all_button.clicked.connect(
+            lambda: self.benchmark_all_requested.emit(int(self.batch_runs.currentText()))
+        )
 
         title = QLabel("Drive benchmarks and qualification")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
@@ -125,12 +140,19 @@ class BenchmarksTab(QWidget):
         status_row.addWidget(self.status, 1)
         status_row.addWidget(self.progress)
         status_row.addWidget(self.cancel_button)
+        status_row.addWidget(QLabel("Runs:"))
+        status_row.addWidget(self.batch_runs)
+        status_row.addWidget(self.benchmark_all_button)
 
         layout = QVBoxLayout(self)
         layout.addWidget(title)
         layout.addWidget(note)
         layout.addWidget(self.table, 1)
         layout.addLayout(status_row)
+
+    def set_operation_running(self, running: bool) -> None:
+        self.batch_runs.setEnabled(not running)
+        self.benchmark_all_button.setEnabled(not running)
 
 
 class LogsTab(QWidget):
@@ -168,7 +190,9 @@ class LogsTab(QWidget):
 class BackendDeploymentTab(QWidget):
     backend_changed = Signal(str)
     probe_requested = Signal(int)
+    probe_all_requested = Signal()
     performance_requested = Signal(int)
+    performance_all_requested = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -202,8 +226,19 @@ class BackendDeploymentTab(QWidget):
         self.vhdx_panel = QGroupBox("Temporary VHDX capability probe")
         self.vhdx_slot = QComboBox()
         self.probe_button = QPushButton("Probe VHDX Backend (8 GiB)")
+        self.probe_all_button = QPushButton("Probe All 4")
         self.performance_button = QPushButton("Run VHDX Performance Test")
         self.performance_button.setEnabled(False)
+        self.performance_runs = QComboBox()
+        self.performance_runs.addItems(("1", "3", "5"))
+        self.performance_all_button = QPushButton("Run Performance Test All")
+        self.performance_all_button.setEnabled(False)
+        self.batch_progress = QLabel("No batch operation running.")
+        self.batch_progress.setWordWrap(True)
+        self.batch_summary = QLabel("No batch results yet.")
+        self.batch_summary.setWordWrap(True)
+        self.batch_cancel_button = QPushButton("Cancel after current run")
+        self.batch_cancel_button.setVisible(False)
         self.vhdx_path = QLabel("—")
         self.vhdx_attach = QLabel("Not run")
         self.vhdx_identity = QLabel("—")
@@ -226,18 +261,36 @@ class BackendDeploymentTab(QWidget):
             self.vhdx_cleanup,
         ):
             label.setWordWrap(True)
+        self.vhdx_slot.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.vhdx_slot.setMinimumContentsLength(16)
         controls = QHBoxLayout()
-        controls.addWidget(self.vhdx_slot)
         controls.addWidget(self.probe_button)
-        controls.addWidget(self.performance_button)
-        form = QFormLayout(self.vhdx_panel)
+        controls.addWidget(self.probe_all_button)
+        controls.addStretch(1)
+        performance_controls = QHBoxLayout()
+        performance_controls.addWidget(self.performance_button)
+        performance_controls.addWidget(QLabel("Runs:"))
+        performance_controls.addWidget(self.performance_runs)
+        performance_controls.addWidget(self.performance_all_button)
+        performance_controls.addStretch(1)
+        probe_layout = QVBoxLayout(self.vhdx_panel)
         probe_scope = QLabel(
             "Probe size: 8 GiB expandable VHDX on the selected filesystem. "
             "The capability probe inspects this temporary disk, then detaches and deletes it."
         )
         probe_scope.setWordWrap(True)
-        form.addRow(probe_scope)
-        form.addRow("Selected physical USB slot", controls)
+        probe_layout.addWidget(probe_scope)
+        slot_form = QFormLayout()
+        slot_form.addRow("USB slot", self.vhdx_slot)
+        probe_layout.addLayout(slot_form)
+        probe_layout.addLayout(controls)
+        probe_layout.addLayout(performance_controls)
+        probe_details = QWidget()
+        form = QFormLayout(probe_details)
+        form.setContentsMargins(0, 6, 0, 0)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.addRow("Temporary VHDX path", self.vhdx_path)
         form.addRow("Attach status", self.vhdx_attach)
         form.addRow("Virtual disk identity", self.vhdx_identity)
@@ -249,9 +302,59 @@ class BackendDeploymentTab(QWidget):
         form.addRow("Direct vs VHDX benchmark", self.vhdx_benchmark)
         form.addRow("Measured overhead", self.vhdx_overhead)
         form.addRow("Cleanup status", self.vhdx_cleanup)
+        for label in (
+            self.vhdx_path, self.vhdx_identity, self.vhdx_pool_reason,
+            self.vhdx_probe_explanation, self.vhdx_benchmark,
+            self.vhdx_overhead, self.vhdx_cleanup,
+        ):
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.probe_details_scroll = QScrollArea()
+        self.probe_details_scroll.setWidgetResizable(True)
+        self.probe_details_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.probe_details_scroll.setWidget(probe_details)
+        probe_layout.addWidget(self.probe_details_scroll, 1)
+
+        self.batch_panel = QGroupBox("Batch results")
+        self.batch_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        batch_layout = QVBoxLayout(self.batch_panel)
+        progress_row = QHBoxLayout()
+        progress_row.addWidget(self.batch_progress, 1)
+        progress_row.addWidget(self.batch_cancel_button)
+        batch_layout.addLayout(progress_row)
+        batch_layout.addWidget(self.batch_summary)
+        legend = QLabel("R / W / S = read / write / sustained write · speeds in MB/s")
+        legend.setStyleSheet("color: #555;")
+        legend.setWordWrap(True)
+        batch_layout.addWidget(legend)
+        self.performance_table = QTableWidget(0, 5)
+        self.performance_table.setHorizontalHeaderLabels(
+            ("Slot", "Runs", "Direct R / W / S", "VHDX R / W / S", "Avg overhead %")
+        )
+        self.performance_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.performance_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.performance_table.verticalHeader().setVisible(False)
+        performance_header = self.performance_table.horizontalHeader()
+        performance_header.setStretchLastSection(False)
+        performance_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        for column in (2, 3, 4):
+            performance_header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+        self.performance_table.horizontalHeaderItem(4).setToolTip(
+            "Arithmetic mean of individual run overhead percentages: read / write / sustained write."
+        )
+        self.performance_table.setVisible(False)
+        batch_layout.addWidget(self.performance_table)
+        for label in (self.batch_progress, self.batch_summary):
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.backend_selector.currentTextChanged.connect(self._backend_selected)
         self.probe_button.clicked.connect(self._emit_probe)
+        self.probe_all_button.clicked.connect(lambda: self.probe_all_requested.emit())
         self.performance_button.clicked.connect(self._emit_performance)
+        self.performance_all_button.clicked.connect(
+            lambda: self.performance_all_requested.emit(
+                int(self.performance_runs.currentText())
+            )
+        )
         self.vhdx_slot.currentIndexChanged.connect(self._update_probe_controls)
 
         self.drive_table = QTableWidget(0, 11)
@@ -275,28 +378,36 @@ class BackendDeploymentTab(QWidget):
         self.drive_table.verticalHeader().setVisible(False)
         header = self.drive_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setStretchLastSection(True)
+        header.setStretchLastSection(False)
 
         self.requirements = QTextBrowser()
-        self.requirements.setMinimumWidth(340)
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
         self.preview.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
 
-        detail_splitter = QSplitter()
-        detail_splitter.addWidget(self.requirements)
-        detail_splitter.addWidget(self.preview)
-        detail_splitter.setStretchFactor(0, 1)
-        detail_splitter.setStretchFactor(1, 2)
-        detail_splitter.setSizes((390, 780))
+        self.deployment_tabs = QTabWidget()
+        self.deployment_tabs.addTab(self.requirements, "Requirements / blockers")
+        self.deployment_tabs.addTab(self.drive_table, "Disk mapping")
+        self.deployment_tabs.addTab(self.preview, "Deployment preview")
+        self.result_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.result_splitter.setChildrenCollapsible(False)
+        self.result_splitter.addWidget(self.batch_panel)
+        self.result_splitter.addWidget(self.deployment_tabs)
+        self.result_splitter.setStretchFactor(0, 0)
+        self.result_splitter.setStretchFactor(1, 1)
+        self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.workspace_splitter.setChildrenCollapsible(False)
+        self.workspace_splitter.addWidget(self.vhdx_panel)
+        self.workspace_splitter.addWidget(self.result_splitter)
+        self.workspace_splitter.setStretchFactor(0, 2)
+        self.workspace_splitter.setStretchFactor(1, 3)
+        self.workspace_splitter.setSizes((480, 720))
 
         layout = QVBoxLayout(self)
         layout.addWidget(title)
         layout.addWidget(safety)
         layout.addLayout(status_row)
-        layout.addWidget(self.vhdx_panel)
-        layout.addWidget(self.drive_table, 1)
-        layout.addWidget(detail_splitter, 1)
+        layout.addWidget(self.workspace_splitter, 1)
 
     def set_assessments(
         self,
@@ -331,14 +442,53 @@ class BackendDeploymentTab(QWidget):
     def set_probe_running(self, running: bool) -> None:
         self._probe_running = running
         self.probe_button.setEnabled(not running)
+        self.probe_all_button.setEnabled(not running and self.vhdx_slot.count() == 4)
         self.vhdx_slot.setEnabled(not running)
+        self.backend_selector.setEnabled(not running)
+        self.performance_runs.setEnabled(not running)
         self._update_probe_controls()
 
+    def set_batch_progress(self, message: str) -> None:
+        self.batch_progress.setText(message)
+
+    def set_probe_batch_summary(self, lines: list[str]) -> None:
+        self.batch_summary.setText("<br>".join(escape(line) for line in lines))
+
+    def set_performance_batch_results(
+        self,
+        results: dict[int, tuple[int, VhdxBenchmarkComparison]],
+    ) -> None:
+        self.performance_table.setRowCount(len(results))
+        for row, (slot, (run_count, item)) in enumerate(sorted(results.items())):
+            values = (
+                f"Slot {slot}",
+                str(run_count),
+                f"{item.direct_read_mbps:.1f} / {item.direct_write_mbps:.1f} / {item.direct_sustained_write_mbps:.1f}",
+                f"{item.vhdx_read_mbps:.1f} / {item.vhdx_write_mbps:.1f} / {item.vhdx_sustained_write_mbps:.1f}",
+                f"{item.read_overhead_percent:+.1f}% / {item.write_overhead_percent:+.1f}% / {item.sustained_write_overhead_percent:+.1f}%",
+            )
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(value)
+                cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                cell.setToolTip(value)
+                self.performance_table.setItem(row, column, cell)
+        self.performance_table.setFixedHeight(
+            self.performance_table.horizontalHeader().sizeHint().height()
+            + self.performance_table.verticalHeader().defaultSectionSize() * max(1, len(results))
+            + self.performance_table.frameWidth() * 2
+        )
+        self.performance_table.setVisible(bool(results))
+
     def set_probe_result(self, result: VhdxProbeResult) -> None:
+        index = self.vhdx_slot.findData(result.slot)
+        if index >= 0:
+            self.vhdx_slot.setCurrentIndex(index)
         self.vhdx_path.setText(result.vhdx_path or "—")
+        self.vhdx_path.setToolTip(result.vhdx_path or "—")
         self.vhdx_attach.setText(result.attach_status)
         disk = result.virtual_disk
         self.vhdx_identity.setText(disk.identity if disk else "—")
+        self.vhdx_identity.setToolTip(disk.identity if disk else "—")
         self.vhdx_size.setText(
             (f"{disk.size_bytes / 1024**2:g} MiB"
              + (" (approximate)" if not disk.size_is_exact else ""))
@@ -354,7 +504,7 @@ class BackendDeploymentTab(QWidget):
             else "Unknown"
         )
         self.vhdx_compatibility.setText(result.status)
-        if result.status == SUPPORTED and result.source_identity:
+        if result.status == SUPPORTED and result.source_identity and not result.leftover_path:
             self._successful_probe_identities[result.slot] = result.source_identity
         elif result.slot in self._successful_probe_identities:
             del self._successful_probe_identities[result.slot]
@@ -390,6 +540,7 @@ class BackendDeploymentTab(QWidget):
             self.set_assessment(assessment)
         is_vhdx = name == "VHDX-backed Storage Spaces"
         self.vhdx_panel.setVisible(is_vhdx)
+        self.batch_panel.setVisible(is_vhdx)
         self.backend_changed.emit(name)
 
     def _emit_probe(self) -> None:
@@ -412,6 +563,19 @@ class BackendDeploymentTab(QWidget):
         )
         self.performance_button.setEnabled(
             not self._probe_running and probe_succeeded
+        )
+        all_slots_ready = (
+            len(self._device_identities) == 4
+            and all(
+                self._successful_probe_identities.get(slot) == identity
+                for slot, identity in self._device_identities.items()
+            )
+        )
+        self.probe_all_button.setEnabled(
+            not self._probe_running and self.vhdx_slot.count() == 4
+        )
+        self.performance_all_button.setEnabled(
+            not self._probe_running and all_slots_ready
         )
 
     def set_assessment(self, assessment: BackendAssessment) -> None:

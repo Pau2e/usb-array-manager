@@ -239,6 +239,37 @@ Qualification defaults:
 - `SLOW READ`: sequential read is below 50 MB/s
 - `GOOD`: none of the conditions above apply
 
+## Version 0.7.3 batch controls and averaged results
+
+- Benchmarks: choose 1, 3, or 5 runs and use **Benchmark All** for every connected
+  assigned slot. A confirmation lists the targets and repetitions; every run
+  repeats the existing mounted-filesystem preflight and temporary-file cleanup.
+- Backend / Deployment: **Probe All 4** checks the saved RAID members (or slots
+  1–4 before a plan is saved). **Run Performance Test All** requires a successful
+  capability probe for every current member and supports 1, 3, or 5 runs.
+- All jobs run sequentially. A worker must finish its complete cleanup before
+  another slot or run starts. Conflicting single-slot and batch controls are
+  disabled while a storage job is active.
+- Benchmark means become the current saved result; the table shows the run count.
+  Optional `run_count` and `individual_runs` fields preserve the existing JSON
+  schema and measurement method. Older unbuffered results load as one run; older
+  cached results remain ignored as before. Qualification uses the existing rule
+  on averaged read, sustained write, and write-stability measurements.
+- A compact performance table shows mean direct/VHDX read, write, sustained-write
+  speeds, and the arithmetic mean of each run's overhead percentage. VHDX results
+  remain in the current session, with every individual run in Logs / Details.
+- A failed slot is reported and remaining slots continue when cleanup succeeds.
+  Incomplete slots retain their previous benchmark; partial repetitions are logged
+  but never saved as a complete requested-run average. Cleanup failures stop the
+  batch. Cancel and window close finish the current batch run and cleanup first.
+- Backend / Deployment uses a horizontal workspace: probe controls/details on
+  the left; batch results and tabbed requirements, disk mapping, and preview on
+  the right. Direct, VHDX, and overhead columns share available table space.
+  Splitters resize each area; only individual detail views scroll when needed.
+  Physical-disk operations,
+  benchmark measurement formulas, eligibility, RAID planning, and dry-run behavior
+  keep their existing implementation.
+
 ## Requirements
 
 - Windows 10 or later
@@ -274,5 +305,5 @@ py -3.12 -m unittest discover -s tests -v
 Inventory and slot detection are read-only. Version 0.3 writes only a temporary
 benchmark file after explicit confirmation. It does not format, partition,
 initialize, mount, unmount, erase, or access raw physical storage devices. Version
-0.7.2 may initialize and format only a newly created disposable virtual disk inside
+0.7.3 may initialize and format only a newly created disposable virtual disk inside
 its uniquely named temporary VHDX, after explicit confirmation.

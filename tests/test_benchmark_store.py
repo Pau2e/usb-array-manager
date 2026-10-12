@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,28 @@ from usb_array_manager.services.benchmark_store import BenchmarkStore
 
 
 class BenchmarkStoreTests(unittest.TestCase):
+    def test_previous_unbuffered_saved_data_loads_without_batch_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "benchmark_results.json"
+            path.write_text(json.dumps({
+                "schema_version": 1,
+                "results": {"1": {
+                    "slot": 1, "tested_at": "2026-10-12T12:00:00+00:00",
+                    "drive_letter": "J:", "file_size_bytes": 1024**3,
+                    "sequential_read_mbps": 100, "sequential_write_mbps": 50,
+                    "burst_write_mbps": 55, "sustained_write_mbps": 40,
+                    "write_stability_cv": 0.1, "qualification": "GOOD",
+                    "measurement_method_version": 2,
+                }},
+            }), encoding="utf-8")
+            store = BenchmarkStore(path)
+            result = store.load_all()[1]
+            self.assertEqual(result.run_count, 1)
+            self.assertEqual(result.individual_runs, ())
+            self.assertEqual(result.sequential_read_mbps, 100)
+            store.save(result)
+            self.assertEqual(store.load_all()[1], result)
+
     def test_result_survives_store_restart_and_can_be_removed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "benchmark_results.json"

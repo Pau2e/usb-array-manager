@@ -36,17 +36,24 @@ class VhdxBenchmarkComparison:
     vhdx_read_mbps: float
     vhdx_write_mbps: float
     vhdx_sustained_write_mbps: float
+    averaged_overhead_percent: tuple[float, float, float] | None = None
 
     @property
     def read_overhead_percent(self) -> float:
+        if self.averaged_overhead_percent is not None:
+            return self.averaged_overhead_percent[0]
         return _overhead(self.direct_read_mbps, self.vhdx_read_mbps)
 
     @property
     def write_overhead_percent(self) -> float:
+        if self.averaged_overhead_percent is not None:
+            return self.averaged_overhead_percent[1]
         return _overhead(self.direct_write_mbps, self.vhdx_write_mbps)
 
     @property
     def sustained_write_overhead_percent(self) -> float:
+        if self.averaged_overhead_percent is not None:
+            return self.averaged_overhead_percent[2]
         return _overhead(
             self.direct_sustained_write_mbps,
             self.vhdx_sustained_write_mbps,

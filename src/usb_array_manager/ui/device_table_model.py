@@ -319,6 +319,7 @@ class BenchmarkTableModel(_FocusedDeviceTableModel):
         "Sustained write MB/s",
         "Qualification",
         "Last benchmark",
+        "Runs",
         "Benchmark control",
     )
 
@@ -336,6 +337,7 @@ class BenchmarkTableModel(_FocusedDeviceTableModel):
                 _speed(result.sustained_write_mbps if result else None),
                 result.qualification if result else "NOT TESTED",
                 _local_timestamp(result.tested_at if result else None),
+                str(result.run_count) if result else "—",
                 "",
             )
             return values[index.column()]

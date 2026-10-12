@@ -2,7 +2,22 @@
 
 ## Current version
 
-**v0.7.2**
+**v0.7.3**
+
+Adds sequential Benchmark All, Probe All 4, and Run Performance Test All controls.
+The existing single-run workers/backend functions perform every run and its
+cleanup. Benchmarks and VHDX performance support 1/3/5 repetitions; arithmetic
+means are calculated separately in `services/batch_results.py`. Benchmark means
+are persisted with optional run-count/individual-run fields in the existing
+schema. VHDX mean results are shown in a compact session table and individual
+runs are logged. Jobs share one UI busy boundary. Cancellation and window close
+finish the current batch run and cleanup; cleanup failure stops the batch.
+Backend / Deployment uses side-by-side probe and results/deployment areas, with
+balanced performance columns and local detail scrolling instead of a whole-page
+vertical scrollbar. Requirements, disk mapping, and deployment preview are
+available in the right-hand tabbed detail area.
+
+The v0.7.2 capability fixes below remain in place:
 
 The Probe VHDX Backend button now always uses an 8 GiB expandable disk on the
 selected filesystem, including FAT32, mixed, or unknown filesystems. It does
@@ -85,6 +100,7 @@ usb-array-manager/
 │   │   ├── benchmark.py               # Safe filesystem benchmark orchestration
 │   │   ├── windows_unbuffered_io.py   # Windows unbuffered/write-through file I/O
 │   │   ├── benchmark_store.py         # Latest result per slot in JSON
+│   │   ├── batch_results.py           # Pure arithmetic means of completed runs
 │   │   ├── raid10_planner.py          # Pairing search, formulas, and warnings
 │   │   ├── raid10_failure_simulator.py# Pure failure/degraded-mode simulation
 │   │   ├── raid10_plan_store.py        # Atomic, versioned logical-slot plan
@@ -470,7 +486,8 @@ deletes it. No feature writes raw sectors or changes storage configuration.
 - There are exactly four logical slots.
 - Weak/duplicated USB firmware identities can remain ambiguous. Location paths
   can change when a device moves ports.
-- Only the latest benchmark per slot is stored; there is no history, trend view,
+- Only the latest benchmark/average per slot is stored, with individual runs for
+  that average; there is no cross-batch history, trend view,
   thermal monitoring, or test-profile selection.
 - Benchmark results require a mounted writable filesystem and free space. A
   sudden unplug or power loss during a benchmark is outside the application's
