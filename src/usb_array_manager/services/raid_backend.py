@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import Counter
+from pathlib import Path
+import sys
 
 from usb_array_manager import __version__
 from usb_array_manager.models.raid_backend import (
@@ -15,7 +17,10 @@ from usb_array_manager.models.raid_backend import (
 )
 from usb_array_manager.models.saved_raid10_plan import SavedRaid10Plan
 from usb_array_manager.models.storage_device import StorageDevice
-from usb_array_manager.models.vhdx_probe import VhdxProbeResult
+from usb_array_manager.models.vhdx_probe import VhdxProbeResult, VhdxTogetherResult
+from usb_array_manager.services.production_planning import (
+    ProductionMember, ProductionPlan, plan_production, validation_fingerprint,
+)
 
 
 class RaidBackend(ABC):
@@ -187,6 +192,10 @@ class VhdxStorageSpacesBackend(RaidBackend):
 
     def __init__(self) -> None:
         self._probe_results: dict[int, VhdxProbeResult] = {}
+        self._together_result: VhdxTogetherResult | None = None
+        self._together_identities: dict[int, str | None] = {}
+        self._production_snapshot: dict[int, tuple] = {}
+        self._production_saved_plan: SavedRaid10Plan | None = None
 
     @property
     def name(self) -> str:
@@ -198,6 +207,74 @@ class VhdxStorageSpacesBackend(RaidBackend):
     def probe_for_slot(self, slot: int) -> VhdxProbeResult | None:
         return self._probe_results.get(slot)
 
+    def record_together(
+        self,
+        result: VhdxTogetherResult | None,
+        devices: tuple[StorageDevice, ...] = (),
+        plan: SavedRaid10Plan | None = None,
+    ) -> None:
+        """Replace session evidence; never turn it into a single-slot probe result."""
+        self._together_result = result
+        self._together_identities = {
+            device.slot: _physical_identity(device)
+            for device in devices if device.slot is not None
+        } if len(devices) == 4 else {}
+        self._production_snapshot = {
+            device.slot: validation_fingerprint(device)
+            for device in devices if device.slot is not None
+        }
+        self._production_saved_plan = plan
+
+    def production_plan(
+        self, plan: SavedRaid10Plan | None,
+        devices: tuple[StorageDevice, ...] | list[StorageDevice],
+        *, ambiguous_slots: set[int] | frozenset[int] = frozenset(),
+        application_drives: frozenset[str] | None = None,
+    ) -> ProductionPlan:
+        selected, blockers = _vhdx_plan_members(plan, devices, ambiguous_slots) if plan else ([], [])
+        current = {device.slot: validation_fingerprint(device) for _, _, device in selected}
+        proven = (
+            self._together_succeeded(devices, ambiguous_slots)
+            and plan is not None and plan == self._production_saved_plan
+            and current == self._production_snapshot
+        )
+        if application_drives is None:
+            application_drives = frozenset(
+                Path(value).drive.casefold() for value in
+                (__file__, sys.executable, sys.argv[0], str(Path.cwd()))
+                if Path(value).drive
+            )
+        return plan_production(plan, selected, blockers, proven,
+                               application_drives=application_drives)
+
+    def _together_succeeded(
+        self,
+        devices: tuple[StorageDevice, ...] | list[StorageDevice],
+        ambiguous_slots: set[int] | frozenset[int],
+    ) -> bool:
+        result = self._together_result
+        if (
+            result is None or result.status != "READY" or not result.simultaneous_verified
+            or len(result.members) != 4
+            or {member.slot for member in result.members} != {1, 2, 3, 4}
+            or set(self._together_identities) != {1, 2, 3, 4}
+        ):
+            return False
+        for member in result.members:
+            matches = [device for device in devices if device.slot == member.slot]
+            if (
+                len(matches) != 1 or not matches[0].is_connected
+                or member.slot in ambiguous_slots
+                or not self._together_identities[member.slot]
+                or _physical_identity(matches[0]) != self._together_identities[member.slot]
+                or not member.identity_verified or member.disk is None
+                or member.disk.can_pool is not True or member.status != "READY"
+                or member.cleanup_status != "Detached and temporary file deleted"
+                or member.leftover_path is not None or member.may_remain_attached
+            ):
+                return False
+        return True
+
     def assess(
         self,
         plan: SavedRaid10Plan | None,
@@ -205,6 +282,7 @@ class VhdxStorageSpacesBackend(RaidBackend):
         *,
         ambiguous_slots: set[int] | frozenset[int] = frozenset(),
     ) -> BackendAssessment:
+        together_succeeded = self._together_succeeded(devices, ambiguous_slots)
         if plan is None:
             needs_admin = next(
                 (
@@ -220,6 +298,8 @@ class VhdxStorageSpacesBackend(RaidBackend):
                 explanation=(
                     needs_admin.explanation
                     if needs_admin
+                    else "Save a RAID10 plan; four-member capability validation has succeeded."
+                    if together_succeeded
                     else "Save a RAID10 plan and probe one mounted USB slot first."
                 ),
                 requirements=("A saved logical-slot RAID10 plan is required.",),
@@ -229,13 +309,16 @@ class VhdxStorageSpacesBackend(RaidBackend):
             )
 
         selected, blockers = _vhdx_plan_members(plan, devices, ambiguous_slots)
+        saved_plan_blockers = tuple(blockers)
         requirements: list[str] = []
+        filesystem_blocked = False
         for slot, _pair, device in selected:
             filesystems = {value.casefold() for value in device.filesystem_types}
             if "fat32" in filesystems:
+                filesystem_blocked = True
                 blockers.append(
                     f"Slot {slot} uses FAT32. A production VHDX larger than 4 GiB "
-                    "requires NTFS or exFAT; the application will not reformat it."
+                    "requires migration to NTFS for this Windows-only deployment; the application will not reformat it."
                 )
             elif not filesystems:
                 requirements.append(f"Slot {slot} filesystem type is unknown.")
@@ -256,19 +339,24 @@ class VhdxStorageSpacesBackend(RaidBackend):
             for result in relevant_results
             if result.status == SUPPORTED and result.leftover_path is None
         ]
-        if not successful:
+        capability_verified = bool(successful) or together_succeeded
+        if not capability_verified:
             requirements.insert(0, "Probe one selected USB slot successfully before deployment planning.")
 
         blockers = _unique(blockers)
         requirements = _unique(requirements)
-        if blockers:
-            status = UNSUPPORTED
-            explanation = "VHDX-backed deployment is blocked by saved-plan safety validation."
-        elif not successful and relevant_results:
+        if capability_verified:
+            status = SUPPORTED
+            explanation = _deployment_summary(
+                blockers, requirements,
+                filesystem_blocked=filesystem_blocked,
+                saved_plan_blocked=bool(saved_plan_blockers),
+            )
+        elif not capability_verified and relevant_results:
             latest = relevant_results[-1]
             status = latest.status
             explanation = latest.explanation
-        elif not successful:
+        elif not capability_verified:
             status = UNKNOWN
             explanation = "No successful temporary VHDX capability probe is available."
         elif requirements:
@@ -281,8 +369,10 @@ class VhdxStorageSpacesBackend(RaidBackend):
                 "members have production-compatible mounted filesystems."
             )
 
+        production = self.production_plan(plan, devices, ambiguous_slots=ambiguous_slots)
+        production_members = {member.slot: member for member in production.members}
         drive_assessments = tuple(
-            _vhdx_drive_assessment(slot, pair, device)
+            _vhdx_drive_assessment(slot, pair, device, production_members.get(slot))
             for slot, pair, device in selected
         )
         return BackendAssessment(
@@ -292,13 +382,28 @@ class VhdxStorageSpacesBackend(RaidBackend):
             requirements=tuple(requirements),
             blockers=tuple(blockers),
             drives=drive_assessments,
-            dry_run_text=_vhdx_dry_run_preview(
-                plan,
-                drive_assessments,
-                tuple(blockers),
-                bool(successful),
-            ),
+            dry_run_text=production.preview,
         )
+
+
+def _deployment_summary(
+    blockers: list[str], requirements: list[str], *,
+    filesystem_blocked: bool, saved_plan_blocked: bool,
+) -> str:
+    """Summarize existing assessment facts without changing any validation state."""
+    if blockers:
+        if filesystem_blocked and saved_plan_blocked:
+            reason = "host filesystem and saved-plan validation requirements remain"
+        elif filesystem_blocked:
+            reason = "host filesystems require migration to NTFS"
+        elif saved_plan_blocked:
+            reason = "saved-plan validation requirements remain"
+        else:
+            reason = "mounted writable host filesystem requirements remain"
+        return f"Production deployment: BLOCKED — {reason}."
+    if requirements:
+        return "Production deployment: WARNING — filesystem information remains incomplete."
+    return "Production deployment: READY"
 
 
 def _vhdx_plan_members(
@@ -347,13 +452,16 @@ def _vhdx_drive_assessment(
     slot: int,
     pair: str,
     device: StorageDevice,
+    production_member: ProductionMember | None = None,
 ) -> BackendDriveAssessment:
     drive = device.drive_letters[0] if device.drive_letters else "<unmounted>"
     filesystem = ", ".join(device.filesystem_types) or "unknown filesystem"
+    path = production_member.path if production_member else None
+    host = production_member.volume.identity if path and production_member.volume else "UNPROVEN"
     return BackendDriveAssessment(
         slot=slot,
         pair=pair,
-        physical_disk=f"{drive} -> future slot{slot}.vhdx",
+        physical_disk=f"Current {drive} (display only); persistent host {host}; planned {path or 'BLOCKED — unproven host mapping'}",
         model=device.model or "Unknown",
         identity=_display_identity(device),
         capacity_bytes=device.capacity_bytes,
@@ -364,51 +472,12 @@ def _vhdx_drive_assessment(
         partition_state=filesystem,
         health=device.health_status or device.operational_status or "Unknown",
         operations=(
-            "Keep the existing USB filesystem and user files unchanged.",
-            f"FUTURE: create a dedicated slot{slot}.vhdx file on {drive}.",
+            "PREVIEW ONLY: this version leaves the existing USB filesystem and user files unchanged.",
+            f"FUTURE: use the revalidated persistent host path {path or '<UNPROVEN VOLUME GUID>'}; never a drive letter as identity.",
+            "After host filesystem migration, rediscover Volume GUIDs and recalculate capacity/free space and VHDX sizing before creating any production file.",
             "FUTURE: attach the file-backed virtual disk and revalidate CanPool.",
         ),
     )
-
-
-def _vhdx_dry_run_preview(
-    plan: SavedRaid10Plan,
-    drives: tuple[BackendDriveAssessment, ...],
-    blockers: tuple[str, ...],
-    probe_succeeded: bool,
-) -> str:
-    lines = [
-        "PREVIEW ONLY — NOT EXECUTED",
-        "NO PRODUCTION VHDX FILES OR STORAGE POOLS WERE CREATED.",
-        "",
-        "Backend: VHDX-backed Storage Spaces",
-        f"Saved plan timestamp: {plan.saved_at}",
-        "",
-        "Future four-member mapping:",
-    ]
-    for drive in drives:
-        lines.append(f"- {drive.pair}, Slot {drive.slot}: USB {drive.physical_disk} -> Virtual Disk")
-    if blockers:
-        lines.extend(("", "BLOCKED:"))
-        lines.extend(f"- {item}" for item in blockers)
-        lines.append("No production command outline was generated.")
-        return "\n".join(lines) + "\n"
-    if not probe_succeeded:
-        lines.extend(("", "A successful single-drive temporary VHDX probe is required first."))
-        return "\n".join(lines) + "\n"
-    lines.extend(
-        (
-            "",
-            "A future release would require:",
-            "- Four uniquely named production VHDX files, one per validated USB slot.",
-            "- Attach and identity verification for each file-backed virtual disk.",
-            "- CanPool=True and healthy status for every virtual disk.",
-            "- A Storage Spaces pool and mirrored virtual-disk layout built only from those VHDX disks.",
-            "",
-            f"These are planning notes only. No Create RAID action exists in v{__version__}.",
-        )
-    )
-    return "\n".join(lines) + "\n"
 
 
 def _drive_assessment(

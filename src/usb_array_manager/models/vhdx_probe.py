@@ -18,6 +18,9 @@ class VhdxDiskInfo:
     other_cannot_pool_reason_description: str = ""
     storage_unique_id: str = ""
     size_is_exact: bool = True
+    storage_device_id: str = ""
+    storage_object_id: str = ""
+    friendly_name: str = ""
 
     @property
     def pool_rejection_details(self) -> str:
@@ -74,6 +77,28 @@ class VhdxProbeResult:
     leftover_path: str | None = None
     benchmark: VhdxBenchmarkComparison | None = None
     source_identity: str = ""
+    diagnostic_details: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class VhdxTogetherMember:
+    slot: int
+    vhdx_path: str
+    disk: VhdxDiskInfo | None
+    identity_verified: bool
+    status: str
+    reason: str
+    cleanup_status: str
+    leftover_path: str | None = None
+    may_remain_attached: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class VhdxTogetherResult:
+    status: str
+    explanation: str
+    members: tuple[VhdxTogetherMember, ...]
+    simultaneous_verified: bool = False
     diagnostic_details: str = ""
 
 

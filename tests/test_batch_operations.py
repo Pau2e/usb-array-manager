@@ -18,6 +18,8 @@ from usb_array_manager.models.vhdx_probe import (
     VhdxBenchmarkComparison,
     VhdxDiskInfo,
     VhdxProbeResult,
+    VhdxTogetherMember,
+    VhdxTogetherResult,
 )
 from usb_array_manager.services.batch_results import (
     average_benchmark_results,
@@ -153,6 +155,110 @@ class BatchOperationTests(unittest.TestCase):
             result = probe_result(item.slot)
             self.window._vhdx_backend.record_probe(result)
             self.window._backend_tab.set_probe_result(result)
+
+    def together_result(self):
+        members = tuple(VhdxTogetherMember(
+            slot=item.slot, vhdx_path=f"T:/temporary/slot{item.slot}.vhdx",
+            disk=replace(probe_result(item.slot).virtual_disk, disk_number=item.slot + 7),
+            identity_verified=True, status="READY", reason="",
+            cleanup_status="Detached and temporary file deleted",
+        ) for item in self.devices)
+        return VhdxTogetherResult("READY", "4/4 VHDX members READY simultaneously", members, True)
+
+    def test_four_member_validation_control_uses_shared_busy_state(self):
+        result = self.together_result()
+        with patch("usb_array_manager.ui.vhdx_together_worker.validate_vhdxs_together", return_value=result) as validate, patch("usb_array_manager.ui.main_window.run_benchmark") as benchmark_run:
+            self.window._backend_tab.together_button.click()
+            self.assertFalse(self.window._benchmarks_tab.benchmark_all_button.isEnabled())
+            self.assertFalse(self.window._backend_tab.together_button.isEnabled())
+            self.assertFalse(self.window._backend_tab.probe_all_button.isEnabled())
+            self.window._start_benchmark_batch(1)
+            self.finish()
+        self.assertEqual(validate.call_count, 1)
+        benchmark_run.assert_not_called()
+        self.assertEqual(self.window._backend_tab.together_table.rowCount(), 4)
+        self.assertEqual(self.window._backend_tab.together_table.item(0, 6).text(), "READY")
+        self.assertIn("4/4 VHDX members READY simultaneously", self.window._backend_tab.batch_summary.text())
+        self.assertTrue(self.window._backend_tab.together_button.isEnabled())
+        self.assertFalse(self.window._backend_tab.performance_all_button.isEnabled())
+
+    def test_four_member_cleanup_failure_blocks_new_vhdx_operations(self):
+        result = self.together_result()
+        member = replace(result.members[1], status="CLEANUP FAILED", leftover_path=result.members[1].vhdx_path, may_remain_attached=True, cleanup_status="Detach failed")
+        result = replace(result, status="FAILED", members=(result.members[0], member, *result.members[2:]))
+        with patch("usb_array_manager.ui.vhdx_together_worker.validate_vhdxs_together", return_value=result), patch("usb_array_manager.ui.main_window.probe_vhdx_backend") as probe:
+            self.window._start_vhdx_together()
+            self.finish()
+            self.window._start_vhdx_probe(1)
+            self.window._start_vhdx_batch(performance=False, runs=1)
+        probe.assert_not_called()
+        self.assertIn(member.leftover_path, self.window._together_cleanup_blocker)
+        self.assertIn("Slot 2", self.window._backend_tab.batch_summary.text())
+
+    def test_simultaneous_ready_does_not_override_fat32_production_blockers(self):
+        self.devices = [replace(item, filesystem_types=("FAT32",)) for item in self.devices]
+        self.window._show_devices(self.devices)
+        self.qualify_all()
+        self.window._saved_raid10_plan = self.window._raid10_plan_store.save(((1, 2), (3, 4)))
+        self.window._rebuild_raid_workspace()
+        with patch("usb_array_manager.ui.vhdx_together_worker.validate_vhdxs_together", return_value=self.together_result()):
+            self.window._start_vhdx_together()
+            self.finish()
+        self.assertIn("READY simultaneously", self.window._backend_tab.batch_summary.text())
+        self.assertEqual(self.window._backend_tab.status.text(), "SUPPORTED")
+        self.assertIn("BLOCKED", self.window._backend_tab.production_readiness.status.text())
+        self.assertIn("FAT32", self.window._backend_tab.requirements.toPlainText())
+
+    def test_four_member_success_updates_planning_requirement_and_later_failure_restores_it(self):
+        self.devices = [replace(item, filesystem_types=("FAT32",)) for item in self.devices]
+        self.window._show_devices(self.devices)
+        self.window._saved_raid10_plan = self.window._raid10_plan_store.save(((1, 2), (3, 4)))
+        self.window._rebuild_raid_workspace()
+        tab = self.window._backend_tab
+        tab.backend_selector.setCurrentText("VHDX-backed Storage Spaces")
+        self.assertIn("Probe one selected USB slot successfully", tab.requirements.toPlainText())
+        with patch("usb_array_manager.ui.vhdx_together_worker.validate_vhdxs_together", return_value=self.together_result()):
+            self.window._start_vhdx_together()
+            self.finish()
+        self.assertNotIn("Probe one selected USB slot successfully", tab.requirements.toPlainText())
+        assessment = self.window._vhdx_backend.assess(self.window._saved_raid10_plan, self.window._model.devices())
+        self.assertEqual(len(assessment.blockers), 4)
+        self.assertTrue(all("FAT32" in blocker for blocker in assessment.blockers))
+        self.assertEqual(tab.status.text(), "SUPPORTED")
+        self.assertIn("BLOCKED", tab.production_readiness.status.text())
+        with patch("usb_array_manager.ui.vhdx_together_worker.validate_vhdxs_together", return_value=replace(self.together_result(), status="FAILED")):
+            self.window._start_vhdx_together()
+            self.finish()
+        self.assertIn("Probe one selected USB slot successfully", tab.requirements.toPlainText())
+
+    def test_unexpected_four_member_failure_invalidates_previous_planning_evidence(self):
+        self.window._saved_raid10_plan = self.window._raid10_plan_store.save(((1, 2), (3, 4)))
+        self.window._rebuild_raid_workspace()
+        with patch("usb_array_manager.ui.vhdx_together_worker.validate_vhdxs_together", return_value=self.together_result()):
+            self.window._start_vhdx_together()
+            self.finish()
+        self.window._vhdx_together_failed("Injected worker failure")
+        self.assertIn("Probe one selected USB slot successfully", self.window._backend_tab.requirements.toPlainText())
+
+    def test_window_close_waits_for_four_member_worker_cleanup(self):
+        started = threading.Event()
+        release = threading.Event()
+        cancelled = []
+
+        def validate(_devices, **kwargs):
+            started.set()
+            release.wait(2)
+            cancelled.append(kwargs["cancel_event"].is_set())
+            return replace(self.together_result(), status="CANCELLED")
+
+        with patch("usb_array_manager.ui.vhdx_together_worker.validate_vhdxs_together", side_effect=validate):
+            self.window._start_vhdx_together()
+            self.wait_until(started.is_set)
+            self.window.close()
+            self.assertTrue(self.window._storage_job_active())
+            release.set()
+            self.finish()
+        self.assertEqual(cancelled, [True])
 
     def test_benchmark_all_four_slots_is_sequential_and_saves_means(self):
         calls = []

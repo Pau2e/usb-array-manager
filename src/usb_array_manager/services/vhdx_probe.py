@@ -524,8 +524,11 @@ if ([string]$disk.UniqueId -ne {_ps_quote(disk.identity)}) {{
     throw 'The verified temporary VHDX identity changed before initialization.'
 }}
 $partition = Initialize-Disk -Number $disk.Number -PartitionStyle GPT -PassThru -ErrorAction Stop |
-    New-Partition -UseMaximumSize -AssignDriveLetter -ErrorAction Stop
+    New-Partition -UseMaximumSize -ErrorAction Stop
+# Do not expose a RAW volume to Explorer: assign its test letter only after format succeeds.
 $partition | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'UAM_VHDX_TEST' -Confirm:$false -ErrorAction Stop | Out-Null
+$partition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction Stop | Out-Null
+$partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -ErrorAction Stop
 ([string]$partition.DriveLetter) + ':\'
 """
         volume_root = self._run_powershell(script).strip()
@@ -1046,6 +1049,9 @@ def _resolve_storage_match(
         )),
         storage_unique_id=disk.storage_unique_id or selected.unique_id,
         size_is_exact=selected.size_bytes is not None or disk.size_is_exact,
+        storage_device_id=selected.device_id,
+        storage_object_id=selected.object_id,
+        friendly_name=selected.friendly_name,
     )
     return resolved, (
         "matched provider object has no CanPool value"

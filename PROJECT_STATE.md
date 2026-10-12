@@ -2,7 +2,113 @@
 
 ## Current version
 
-**v0.7.3**
+**v0.7.5.3**
+
+Version 0.7 milestone closed on 2026-10-13 at the user's request. This checkpoint
+includes all completed changes through v0.7.5.3. Production deployment remains
+PREVIEW ONLY; no v0.8 work or production/destructive action has been enabled.
+
+Production sizing is now conservative: reserve max(2 GiB, 8% of the smallest
+usable host), subtract an additional 256 MiB VHDX/filesystem allowance, and
+round logical capacity DOWN to 256 MiB. For ~28.64 GiB this calculates 26 GiB
+per member, not a hard-coded size. The same reserve/overhead feeds existing
+full-growth free-space checks. Capacity estimates reuse the calculated logical
+size; mirror/layout assumptions and formulas are unchanged. Pre-format warnings,
+post-format recalculation and migration command placeholders remain mandatory.
+
+Overview and Benchmarks are separate full-width tabs again. Existing panel/model
+instances, aliases, selection, button and batch signals are reused; no duplicate
+results or slot state. The merged-page wrapper and its column reordering were
+removed. Planner/failure tabs still use dynamic insertion before Backend /
+Deployment and share one workspace. Runtime, project and installed package
+metadata report 0.7.5.3. Regression tests were updated for separate tabs and
+extended for switch persistence, sizing/overhead, rounding and representative
+small/large capacities. No production/destructive execution or v0.8 work exists.
+
+Preview/readiness presentation cleanup only. The old VHDX deployment-preview
+generator (which stopped at FAT32 blockers and used letter-based mapping) was
+removed; backend Deployment preview now reuses the production planner's canonical
+preview. Current letters are display-only, Volume GUIDs authoritative, and file
+paths deterministic. Blocked plans show the complete future procedure under
+PREVIEW ONLY — BLOCKED — DO NOT EXECUTE. For filesystem migration, command
+templates use revalidated Volume GUID/recalculated sizing placeholders. Both
+preview and readiness details label current sizing as a pre-format estimate and
+require fresh capacity/free-space/reserve/VHDX sizing after formatting and user
+data restoration. Sizing formulas, validation state, probe/benchmark lifecycle,
+CanPool and RAID logic remain unchanged. Six regression tests cover the shared
+blocked preview, GUID identity, no carried-forward sizing, fresh measurements,
+read-only UI and no storage-command execution. The earlier summary cleanup remains:
+
+Presentation cleanup: one backend capability label, production summary based on
+the existing active filesystem/saved-plan blocker categories, and separated
+per-slot operation headings. Validation, sizing, saved plans, RAID calculations
+and deployment execution behavior are unchanged.
+
+With explicit user approval, temporary performance-test preparation now formats
+the already verified temporary VHDX partition before assigning its drive letter.
+Previously New-Partition assigned the letter while the volume was still RAW,
+allowing Explorer to show a format prompt. Physical USB letters/partitions,
+capability-only probing, CanPool and shared detach/delete cleanup are unchanged.
+No live physical/VHDX performance test was run during this fix; prompt suppression
+needs user verification. Regression tests capture the generated preparation script
+and assert identity guards, stop-on-error, format-before-letter ordering and letter
+re-query. The v0.7.5 production planner remains in place:
+
+Adds preview-only production readiness and layout planning in
+`services/production_planning.py`, presented by a dedicated
+`ui/production_readiness.py` tab. Existing physical safety/member selection and
+four-member proof are reused; production evidence additionally binds the saved
+plan, Volume GUIDs, filesystems and capacities captured at validation start.
+No evidence survives restart. Recomputed readiness separates backend SUPPORTED
+from production BLOCKED (including FAT32), reports host free space and derives
+equal dynamic VHDX sizes from the smallest usable host with explicit reserves.
+Read-only Win32_Volume inventory supplies GUID/filesystem/capacity/free-space
+facts. Missing/ambiguous/mismatching volume associations fail closed.
+
+The future layout is two-way mirror / RAID10-like, two data copies/two columns,
+not fixed RAID10 pairs; one member failure is guaranteed tolerable, two are not.
+Capacity estimates and conditional DiskPart/PowerShell/startup instructions are
+TEXT ONLY. Final mount point remains unconfigured (WARNING after other checks
+pass). No production storage executor or enabled deployment button exists.
+Temporary lifecycle, eligibility queries, RAID formulas and benchmark behavior
+are unchanged. The previous 0.7.4.1 bugfix remains in place:
+
+Fixes the deployment-planning prerequisite state: a clean, identity-verified 4/4
+simultaneous CanPool success now counts as sufficient capability evidence. The
+latest four-member result is retained separately in VhdxStorageSpacesBackend for
+the current session and is bound to the test's physical-slot identities. A later
+failed result, worker error, or mismatching current identity invalidates that
+evidence. Independent single-slot probe behavior is preserved. No capability
+state is persisted or inferred from saved plans on restart. All four FAT32
+production blockers remain unchanged; lifecycle, CanPool queries, calculations,
+and deployment behavior are unchanged by this bugfix.
+
+The v0.7.4 capability workflow remains in place:
+
+Adds Validate 4 VHDXs Together: a separate temporary capability workflow in
+`services/vhdx_together.py` with a dedicated Qt worker. It preflights all four
+members before creating one uniquely owned 8 GiB expandable VHDX per USB, attaches
+all four, validates image-path/disk/Storage Spaces identities and CanPool from a
+shared snapshot, rechecks all image links, then detaches/deletes every owned file
+in `finally`. Creation/attachment commands are sequential; only the attachment
+set is simultaneous. It never benchmarks, initializes, partitions, formats or
+creates a pool. Failure stages and per-member cleanup are logged; residual files
+or potentially attached members block further VHDX operations in the session.
+The compact result table is in the Four-member validation result tab. READY
+requires verified simultaneous eligibility and successful cleanup. FAT32 remains
+separately blocked for production deployment. The user's initial 2026-10-13 log confirms
+all four VHDXs attached simultaneously, their image paths verified, and cleanup
+succeeded. A Windows PowerShell 5.1 JSON-array wrapper bug made the shared
+physical-disk rows appear as one `{value, Count}` object, producing UNKNOWN
+CanPool results. The query now explicitly enumerates decoded array members.
+Malformed records are logged as query failures instead of misleading READY
+objects. A regression test runs the actual Windows PowerShell serializer on
+synthetic four-disk data; other tests use fake Windows providers and tiny fixture
+files in temporary directories. The user subsequently confirmed the corrected
+live test with a screenshot showing 4/4 members READY simultaneously, all four
+identities verified, CanPool=True, and all temporary VHDXs detached/deleted.
+
+The v0.7.3 batch behavior remains in place:
 
 Adds sequential Benchmark All, Probe All 4, and Run Performance Test All controls.
 The existing single-run workers/backend functions perform every run and its
@@ -110,7 +216,7 @@ usb-array-manager/
 │   └── ui/
 │       ├── main_window.py             # Inventory, slots, benchmark workflow
 │       ├── device_table_model.py      # Inventory/benchmark table model
-│       ├── device_tabs.py             # Overview, Benchmarks, and Logs tabs
+│       ├── device_tabs.py             # Separate Overview, Benchmarks, and other tab layouts
 │       └── raid10_planner_dialog.py   # Planner and failure simulator GUI
 └── tests/                             # unittest coverage for every service/UI seam
 ```

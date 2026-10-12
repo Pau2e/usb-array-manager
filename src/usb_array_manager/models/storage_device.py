@@ -4,6 +4,19 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
+class HostVolume:
+    """Read-only volume facts associated with a physical USB member."""
+
+    identity: str | None
+    drive_letter: str | None
+    filesystem: str | None
+    capacity_bytes: int | None
+    free_bytes: int | None
+    is_system: bool | None = None
+    is_boot: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class StorageDevice:
     model: str | None
     serial_number: str | None
@@ -34,3 +47,4 @@ class StorageDevice:
     partition_style: str | None = None
     filesystem_types: tuple[str, ...] = ()
     operational_status: str | None = None
+    host_volumes: tuple[HostVolume, ...] = ()

@@ -3,6 +3,140 @@
 A Windows desktop application that inventories connected USB storage devices,
 maps them to persistent logical slots, and safely benchmarks mounted filesystems.
 
+## Version 0.7.5.3 — Conservative sizing and separate inventory/benchmark tabs
+
+Production VHDX sizing uses the smallest usable host volume. Reserve
+**max(2 GiB, 8% of that capacity)** as host filesystem working space, add
+**256 MiB** of VHDX/filesystem overhead, and round the remaining logical size
+DOWN to 256 MiB. The same calculated size is used on all four members. For
+approximately 28.64 GiB hosts this gives about 26.00 GiB each, 104 GiB raw
+virtual capacity and 52 GiB theoretical two-way mirrored capacity; formatted
+capacity is estimated slightly lower, never promised exactly.
+
+This remains a pre-format estimate for FAT32 hosts. Migration requires fresh
+Volume GUID discovery, capacity/free-space and existing-data checks, recalculated
+reserves/sizes and current validation before any future creation. Command previews
+retain `<RECALCULATED_VHDX_SIZE_MIB>` while migration is outstanding.
+
+**Overview** and **Benchmarks** are separate full-width tabs again. The original
+widgets, inventory/benchmark models, slot state, controller signals and sequential
+batch services are reused, not cloned. Changing tabs does not reload or copy
+benchmark results or slot state. The unused merged-page wrapper was removed.
+Current runtime, project and installed package metadata report **0.7.5.3**.
+Existing preview/readiness, GUID identity, probing, cleanup, safety and RAID/Storage
+Spaces layout behavior remain intact. No production action or Version 0.8 work
+has been added.
+
+Manual checks: verify the sizing calculation and pre-format placeholders; switch
+between Overview and Benchmarks after a result, verify slots/results remain the
+same, and check slot assignment, per-slot benchmark actions, Runs and Benchmark All.
+
+## Historical release 0.7.5.2 — Preview/readiness cleanup
+
+Final UI cleanup merges inventory and benchmark controls into one
+**Overview / Benchmarks** page. The original inventory panel sits on the left
+and the original benchmark panel on the right, in a resizable 45% / 55%
+horizontal split. Both retain their existing models, selection, signals and
+services; no independent second benchmark UI exists. Per-slot benchmark buttons
+are placed beside the slot column visually, keeping actions visible in the
+narrower panel without changing model indices. Wider tables scroll horizontally.
+The standalone Benchmarks navigation tab is removed. Runs, Benchmark All,
+qualification/status/help, slot assignment and refresh remain unchanged.
+
+That release's source, project/package metadata and installed editable distribution
+reported **0.7.5.2**. Earlier version headings below describe historical changes,
+not the current running application.
+
+Deployment preview and Production readiness now use the same production planning
+text. Each member displays its current letter for readability, its authoritative
+persistent Volume GUID, and the deterministic `USBArrayManager\slotN.vhdx` path.
+Unknown host identity never falls back to a drive-letter-based production path.
+
+Blocked plans still show the complete future sequence and conditional command
+templates, labelled **PREVIEW ONLY — BLOCKED — DO NOT EXECUTE**. This does not
+remove any blocker or add an executor. After FAT32 → NTFS migration, rediscover
+and revalidate every Volume GUID, restore user data, remeasure capacity/free space,
+recalculate reserves/VHDX size and repeat four-member validation before production
+creation. Current sizing is a **pre-format estimate**, not an approved final size.
+Migration command templates use post-format GUID and size placeholders, never
+blindly carrying old values forward.
+
+Manual checks: after four-member success on FAT32, open Deployment preview and
+confirm the blocked banner, four GUID/path mappings, all future steps and sizing
+placeholders. Compare it with Production readiness's command preview. No production
+files, formatting, pools or startup registrations should be created.
+
+## Historical release 0.7.5.1 — UI/state summary cleanup
+
+The backend capability label is shown once. Production status wording is derived
+from active filesystem and saved-plan blocker categories, without changing the
+underlying blockers or validation rules. Planned operations headings use
+`Planned operations by drive — Slot N` with explicit paragraph separation.
+
+The user also approved a narrow temporary-performance-volume preparation fix:
+the verified temporary VHDX partition is formatted before assigning its test
+drive letter, preventing exposure of an unformatted drive to Explorer. This
+avoids the Windows "You need to format the disk" prompt caused by early letter
+assignment. It does not change physical USB letters, modify physical partitions,
+alter capability-only probing/CanPool queries, or bypass identity verification.
+Format errors still stop preparation and use the existing detach/delete cleanup.
+No global automount, Windows notification or registry settings are modified.
+
+Manual checks: verify the concise top summary for FAT32-only and combined
+blockers; check each slot heading; run a confirmed performance test and verify
+that Windows no longer prompts to format the temporary drive and cleanup succeeds.
+Do not click Format in a Windows prompt; cancel and inspect Logs / Details if one
+still appears. No production deployment or Version 0.8 work is included.
+
+## Version 0.7.5 — Production readiness (PREVIEW ONLY)
+
+Backend / Deployment includes a Production readiness tab with checklist, host
+filesystem facts, deterministic Volume GUID file paths, sizing/capacity estimates,
+future command text and reboot/auto-attach planning. A proven backend is SUPPORTED
+even when production deployment is BLOCKED by FAT32. NTFS is recommended for this
+Windows-only plan; filesystem migration is never performed automatically.
+
+The equal dynamic VHDX logical size is derived from the smallest usable host
+volume, now reserving max(2 GiB, 8%) per host plus 256 MiB for VHDX/filesystem overhead, rounded
+down to 256 MiB. Each host must have enough current free space for full growth
+and the reserve; existing files are not assumed reclaimable. Capacity previews
+use two-way mirroring, a 1% pool allocation margin and then a 1% NTFS allowance.
+These are estimates, not provider allocation guarantees.
+
+The planned Storage Spaces geometry is **two-way mirror / RAID10-like**, four
+members, two data copies and two columns. This does not enforce the RAID planner's
+fixed mirror pairs or guarantee survival of two member failures. Future deployment
+must confirm that Windows honors the requested geometry, without silent fallback.
+The final mount point is unconfigured and reported as WARNING when other checks
+are ready.
+
+Layout parameter reference: [Microsoft New-VirtualDisk documentation](https://learn.microsoft.com/en-us/powershell/module/storage/new-virtualdisk).
+
+Production eligibility reuses clean four-member simultaneous validation and binds
+it to the saved plan, physical slot identities, host Volume GUIDs, filesystem and
+capacity snapshot. Letter changes alone are harmless. Filesystem migration,
+changed volume identities or saved plans require fresh validation. Results are
+session-only, not inferred from a saved plan after restart. Missing or ambiguous
+volume mappings block planning; only read-only Win32_Volume inspection was added.
+
+All production steps are **PREVIEW ONLY — NOT EXECUTED**. There is no deployment
+executor, enabled Deploy/Create button, production file creation, physical disk
+formatting, pool creation, drive-letter assignment or startup registration.
+Existing temporary capability/benchmark controls retain their own confirmations
+and cleanup behavior.
+
+Manual regression checks:
+
+- With a saved plan, run the existing four-member validation: backend SUPPORTED,
+  four-member checklist READY, FAT32 host filesystem BLOCKED; no extra single probe.
+- Check all four host identities, filesystem/free-space values and deterministic
+  `slot1.vhdx` through `slot4.vhdx` paths; no production files should exist.
+- Review the size derivation, capacity chain, commands and startup notes.
+- Unplug a member or change the saved plan: production validation must be BLOCKED.
+- Restart: validation must require current session proof.
+- At 1280×720 / 1366×768, verify the new local tabs/details remain accessible and
+  all existing single-slot and sequential batch controls still work.
+
 ## Version 0.1 features
 
 - Detect connected USB storage devices
@@ -270,6 +404,64 @@ Qualification defaults:
   benchmark measurement formulas, eligibility, RAID planning, and dry-run behavior
   keep their existing implementation.
 
+## Version 0.7.4 simultaneous four-member capability validation
+
+Use **Validate 4 VHDXs Together** in Backend / Deployment to test all four
+assigned RAID members as one temporary attachment set. After confirming the
+listed members, the application preflights all four identities, mounted writable
+filesystems, free space, and system/boot-disk exclusions before creating files.
+It creates one unique 8 GiB expandable VHDX per member inside a separate
+invocation-owned directory under `.usb-array-manager-vhdx-test`.
+
+Creation and attachment commands still run one at a time. All four VHDXs then
+remain attached during a shared Storage Spaces capability snapshot. The existing
+DiskPart lifecycle, inventory fallback, and Storage Spaces matching helpers are
+reused. Read-only `Get-DiskImage` links each exact file path to its attached disk;
+file-backed type, virtual size, disk identity, UniqueId, DeviceId/ObjectId and
+virtual model are checked where exposed. All four image links are checked again
+after the capability queries. Ambiguous or duplicate mappings are rejected.
+Shared JSON arrays are explicitly enumerated for Windows PowerShell 5.1 so
+physical disks remain separate records. Malformed serialization is diagnosed as
+a provider-query failure; it cannot masquerade as one successful disk record.
+
+The **Four-member validation** result tab shows Slot, VHDX, Disk, Identity
+verified, CanPool, CannotPoolReason and Status. Hover a row for the full path,
+identity fields, failure reason and cleanup status. Overall **READY** requires
+all four members verified and `CanPool=True` during the shared attachment window,
+followed by successful cleanup. A negative, missing or ambiguous result reports
+PARTIAL/FAILED and a per-slot reason. Production deployment remains a separate
+assessment: FAT32 does not alone block this small expandable temporary test, but
+still blocks production VHDXs larger than its single-file limit.
+
+A `finally` cleanup attempts every owned member independently, even after a
+creation or attachment failure. Ownership is tracked through the unique private
+directory and file identity. Cleanup detaches by the temporary file path and
+deletes only that invocation's file; a replaced file is preserved. Detach failures
+keep the file for recovery. Any leftover or potentially attached member is listed
+explicitly and further VHDX testing in that session is blocked until the issue is
+resolved and the app restarted. Window close requests a stop between stages and
+waits for cleanup; it never terminates the worker.
+
+This capability test creates no pool, partitions, filesystem or production VHDX,
+and performs no benchmarks. Existing Benchmark All, Probe All 4, and Performance
+Test All remain sequential. Full diagnostics and cleanup outcomes appear in
+Logs / Details.
+
+## Version 0.7.4.1 validation-state bugfix
+
+A successful four-member validation now satisfies the deployment-planning probe
+prerequisite without a separate single-slot probe. The backend retains the latest
+four-member result in the current session, tied to the physical identities used
+by that test. All four identities must remain current and unambiguous, all four
+members must have `CanPool=True`, and cleanup must have succeeded.
+
+A later failed validation replaces that evidence, and unexpected worker failure
+clears it. A valid independent single-slot probe still satisfies the prerequisite
+as before. No capability proof is persisted to disk; restarting the app does not
+inherit proof from the previous session or a reloaded RAID10 plan. FAT32 production
+blockers, lifecycle/CanPool checks, calculations and text-only deployment behavior
+remain unchanged.
+
 ## Requirements
 
 - Windows 10 or later
@@ -305,5 +497,8 @@ py -3.12 -m unittest discover -s tests -v
 Inventory and slot detection are read-only. Version 0.3 writes only a temporary
 benchmark file after explicit confirmation. It does not format, partition,
 initialize, mount, unmount, erase, or access raw physical storage devices. Version
-0.7.3 may initialize and format only a newly created disposable virtual disk inside
-its uniquely named temporary VHDX, after explicit confirmation.
+0.7.5 production planning only inspects, calculates and displays text. Existing
+optional VHDX performance tests may initialize and format only a newly created
+disposable virtual disk inside its uniquely named temporary VHDX, after explicit confirmation.
+The simultaneous four-member capability test never initializes or formats even
+its temporary VHDXs.

@@ -29,6 +29,7 @@ from usb_array_manager.models.storage_device import StorageDevice
 from usb_array_manager.models.vhdx_probe import (
     VhdxBenchmarkComparison,
     VhdxProbeResult,
+    VhdxTogetherResult,
 )
 from usb_array_manager.services.benchmark import (
     BenchmarkCancelled,
@@ -73,6 +74,7 @@ from usb_array_manager.ui.device_tabs import (
     OverviewTab,
 )
 from usb_array_manager.ui.raid10_planner_dialog import Raid10PlannerDialog
+from usb_array_manager.ui.vhdx_together_worker import VhdxTogetherThread
 
 
 class DeviceScanThread(QThread):
@@ -210,6 +212,8 @@ class MainWindow(QMainWindow):
         self._scan_thread: DeviceScanThread | None = None
         self._benchmark_thread: BenchmarkThread | None = None
         self._vhdx_thread: VhdxProbeThread | None = None
+        self._together_thread: VhdxTogetherThread | None = None
+        self._together_cleanup_blocker = ""
         self._benchmark_batch: _BenchmarkBatchState | None = None
         self._vhdx_batch: _VhdxBatchState | None = None
         self._closing = False
@@ -258,6 +262,7 @@ class MainWindow(QMainWindow):
         self._backend_tab.probe_all_requested.connect(
             lambda: self._start_vhdx_batch(performance=False, runs=1)
         )
+        self._backend_tab.together_requested.connect(self._start_vhdx_together)
         self._backend_tab.performance_requested.connect(
             lambda slot: self._start_vhdx_probe(slot, performance=True)
         )
@@ -535,6 +540,7 @@ class MainWindow(QMainWindow):
         return (
             self._benchmark_thread is not None
             or self._vhdx_thread is not None
+            or self._together_thread is not None
             or self._benchmark_batch is not None
             or self._vhdx_batch is not None
         )
@@ -605,8 +611,9 @@ class MainWindow(QMainWindow):
         workspace.diagnostic.connect(self._log)
         self._raid10_workspace = workspace
         workspace.planner_page.setEnabled(not self._storage_job_active())
-        self._tabs.insertTab(2, workspace.planner_page, "RAID10 Planner")
-        self._tabs.insertTab(3, workspace.failure_page, "Failure Simulator")
+        planner_index = self._tabs.indexOf(self._backend_tab)
+        self._tabs.insertTab(planner_index, workspace.planner_page, "RAID10 Planner")
+        self._tabs.insertTab(planner_index + 1, workspace.failure_page, "Failure Simulator")
         self._refresh_backend_assessments(ambiguous_slots)
         if was_planner:
             self._tabs.setCurrentWidget(workspace.planner_page)
@@ -655,6 +662,9 @@ class MainWindow(QMainWindow):
             assessments,
             self._selected_backend_name,
         )
+        self._backend_tab.set_production_plan(self._vhdx_backend.production_plan(
+            self._saved_raid10_plan, self._model.devices(), ambiguous_slots=ambiguous_slots,
+        ))
         return assessments
 
     def _backend_selection_changed(self, name: str) -> None:
@@ -663,6 +673,9 @@ class MainWindow(QMainWindow):
 
     def _start_vhdx_probe(self, slot: int, performance: bool = False) -> None:
         if self._storage_job_active():
+            return
+        if self._together_cleanup_blocker:
+            QMessageBox.warning(self, "VHDX cleanup required", self._together_cleanup_blocker)
             return
         device = next(
             (item for item in self._model.devices() if item.slot == slot and item.is_connected),
@@ -831,11 +844,9 @@ class MainWindow(QMainWindow):
             and capability.source_identity == _device_identity(device)
         )
 
-    def _start_vhdx_batch(self, *, performance: bool, runs: int) -> None:
-        if self._storage_job_active():
-            return
-        if runs not in (1, 3, 5):
-            raise ValueError("Runs must be 1, 3, or 5.")
+    def _four_vhdx_devices(self, *, performance: bool = False) -> tuple[StorageDevice, ...]:
+        if self._together_cleanup_blocker:
+            raise ValueError(self._together_cleanup_blocker)
         for slot in range(1, SLOT_COUNT + 1):
             previous = self._vhdx_backend.probe_for_slot(slot)
             if previous is not None and (
@@ -847,31 +858,37 @@ class MainWindow(QMainWindow):
                     "restart the application before starting another VHDX batch. "
                     + (f"Leftover: {previous.leftover_path}" if previous.leftover_path else previous.cleanup_status)
                 )
-                self._log("VHDX batch", message)
-                QMessageBox.warning(self, "VHDX cleanup required", message)
-                return
+                raise ValueError(message)
         slots = (
             sorted(self._saved_raid10_plan.slots)
             if self._saved_raid10_plan is not None
             else list(range(1, SLOT_COUNT + 1))
         )
         devices: list[StorageDevice] = []
+        for slot in slots:
+            matches = [
+                item for item in self._model.devices()
+                if item.slot == slot and item.is_connected
+            ]
+            if len(matches) != 1:
+                raise ValueError(f"Slot {slot} must map to one connected assigned drive.")
+            current = self._batch_device(matches[0])
+            if performance and not self._vhdx_performance_ready(current):
+                raise ValueError(
+                    f"Slot {slot} requires a successful capability probe for its current identity."
+                )
+            devices.append(current)
+        if len(devices) != 4 or len(set(slots)) != 4:
+            raise ValueError("Exactly four assigned RAID-member slots are required.")
+        return tuple(devices)
+
+    def _start_vhdx_batch(self, *, performance: bool, runs: int) -> None:
+        if self._storage_job_active():
+            return
+        if runs not in (1, 3, 5):
+            raise ValueError("Runs must be 1, 3, or 5.")
         try:
-            for slot in slots:
-                matches = [
-                    item for item in self._model.devices()
-                    if item.slot == slot and item.is_connected
-                ]
-                if len(matches) != 1:
-                    raise ValueError(f"Slot {slot} must map to one connected assigned drive.")
-                current = self._batch_device(matches[0])
-                if performance and not self._vhdx_performance_ready(current):
-                    raise ValueError(
-                        f"Slot {slot} requires a successful capability probe for its current identity."
-                    )
-                devices.append(current)
-            if len(devices) != 4 or len(set(slots)) != 4:
-                raise ValueError("Exactly four assigned RAID-member slots are required.")
+            devices = self._four_vhdx_devices(performance=performance)
         except (ValueError, SlotStoreError) as error:
             QMessageBox.warning(self, "VHDX batch unavailable", str(error))
             self._log("VHDX batch", str(error))
@@ -908,6 +925,90 @@ class MainWindow(QMainWindow):
         self._set_storage_controls_busy(True)
         self._log("VHDX batch", f"Started {action}, {runs} run(s) per slot, sequentially.")
         self._start_next_vhdx_batch_step()
+
+    def _start_vhdx_together(self) -> None:
+        if self._storage_job_active():
+            return
+        try:
+            devices = self._four_vhdx_devices()
+        except (ValueError, SlotStoreError) as error:
+            QMessageBox.warning(self, "Four-member validation unavailable", str(error))
+            self._log("Four-member validation", str(error))
+            return
+        warning = QMessageBox(self)
+        warning.setIcon(QMessageBox.Icon.Warning)
+        warning.setWindowTitle("Validate 4 VHDXs Together")
+        warning.setText("Create and attach four temporary 8 GiB expandable VHDXs together?")
+        warning.setInformativeText(
+            "One unique temporary file will be created on each member. All four remain "
+            "attached for a shared identity and Storage Spaces eligibility check, then "
+            "are detached and deleted. This test does not create a pool, filesystem or "
+            "production VHDX, and runs no benchmarks. Do not unplug the drives.\n\n"
+            + "\n".join(f"Slot {item.slot}: {item.model} — {', '.join(item.drive_letters)}" for item in devices)
+        )
+        warning.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        warning.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if warning.exec() != QMessageBox.StandardButton.Yes:
+            return
+        self._selected_backend_name = self._vhdx_backend.name
+        self._backend_tab.backend_selector.setCurrentText(self._selected_backend_name)
+        self._together_thread = VhdxTogetherThread(devices, self)
+        self._together_thread.saved_plan = self._saved_raid10_plan
+        self._together_thread.validation_finished.connect(self._vhdx_together_result)
+        self._together_thread.validation_failed.connect(self._vhdx_together_failed)
+        self._together_thread.progress.connect(self._backend_tab.set_batch_progress)
+        self._together_thread.diagnostic.connect(lambda message: self._log("Four-member validation", message))
+        self._together_thread.finished.connect(self._vhdx_together_finished)
+        self._backend_tab.show_together_started()
+        self._backend_tab.batch_cancel_button.setVisible(False)
+        self._set_storage_controls_busy(True)
+        self._together_thread.start()
+
+    def _vhdx_together_result(self, result: VhdxTogetherResult) -> None:
+        devices = self._together_thread.devices if self._together_thread is not None else ()
+        plan = getattr(self._together_thread, "saved_plan", None)
+        self._vhdx_backend.record_together(result, devices, plan)
+        try:
+            ambiguous = self._slot_store.ambiguous_slots(self._connected_devices)
+        except SlotStoreError:
+            ambiguous = set()
+        self._refresh_backend_assessments(ambiguous)
+        self._backend_tab.set_together_result(result)
+        self._backend_tab.set_batch_progress("Four-member validation finished; review cleanup results.")
+        self._log("Four-member validation result", f"{result.status}: {result.explanation}")
+        problems = [
+            f"Slot {member.slot}: {member.vhdx_path} — {member.cleanup_status}; may remain attached={member.may_remain_attached}"
+            for member in result.members
+            if member.leftover_path or member.may_remain_attached or member.status == "CLEANUP FAILED"
+        ]
+        if problems:
+            self._together_cleanup_blocker = (
+                "Resolve these cleanup failures and restart the application before further VHDX tests:\n"
+                + "\n".join(problems)
+            )
+            QMessageBox.critical(self, "VHDX cleanup required", self._together_cleanup_blocker)
+
+    def _vhdx_together_failed(self, message: str) -> None:
+        self._vhdx_backend.record_together(None)
+        try:
+            ambiguous = self._slot_store.ambiguous_slots(self._connected_devices)
+        except SlotStoreError:
+            ambiguous = set()
+        self._refresh_backend_assessments(ambiguous)
+        self._together_cleanup_blocker = (
+            "Unexpected validation error; review cleanup in Logs / Details before restarting: " + message
+        )
+        self._log("Four-member validation error", self._together_cleanup_blocker)
+        self._backend_tab.set_probe_batch_summary(["FAILED: " + self._together_cleanup_blocker])
+        QMessageBox.warning(self, "Four-member validation failed", self._together_cleanup_blocker)
+
+    def _vhdx_together_finished(self) -> None:
+        if self._together_thread is not None:
+            self._together_thread.deleteLater()
+        self._together_thread = None
+        self._set_storage_controls_busy(False)
+        if self._closing:
+            QTimer.singleShot(0, self.close)
 
     def _start_next_vhdx_batch_step(self) -> None:
         state = self._vhdx_batch
@@ -1481,6 +1582,8 @@ class MainWindow(QMainWindow):
                 self._vhdx_batch.cancelled = True
             elif self._vhdx_thread is not None:
                 self._vhdx_thread.cancel()
+            if self._together_thread is not None:
+                self._together_thread.cancel()
             self._status.setText("Finishing safely and deleting temporary files…")
             self._benchmarks_tab.status.setText(
                 "Finishing safely and deleting temporary files…"

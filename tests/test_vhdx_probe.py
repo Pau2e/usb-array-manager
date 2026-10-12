@@ -752,6 +752,28 @@ SELECT      - Shifts the focus to an object.
         prepare.assert_called_once_with(virtual)
         self.assertEqual(detected.volume_root, "V:\\")
 
+    def test_performance_letter_is_assigned_only_after_format_success(self) -> None:
+        runner = DiskPartVhdxRunner()
+        with patch.object(runner, "_run_powershell", return_value="V:\\") as run:
+            self.assertEqual(runner._prepare_filesystem(self.disk(42)), "V:\\")
+        script = run.call_args.args[0]
+        partition_line = next(line for line in script.splitlines() if "New-Partition" in line)
+        self.assertNotIn("AssignDriveLetter", partition_line)
+        self.assertLess(script.index("Format-Volume"), script.index("Add-PartitionAccessPath"))
+        self.assertIn("-AssignDriveLetter -ErrorAction Stop", script)
+        self.assertIn("Format-Volume -FileSystem NTFS", script)
+        self.assertIn("-Confirm:$false -ErrorAction Stop", script)
+        self.assertIn("Get-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber", script)
+        self.assertLess(script.index("Refusing to initialize"), script.index("Initialize-Disk"))
+        self.assertLess(script.index("identity changed"), script.index("Initialize-Disk"))
+
+    def test_performance_preparation_failure_propagates_to_existing_cleanup(self) -> None:
+        runner = DiskPartVhdxRunner()
+        error = VhdxProbeError("Formatting failed")
+        with patch.object(runner, "_run_powershell", side_effect=error):
+            with self.assertRaisesRegex(VhdxProbeError, "Formatting failed"):
+                runner._prepare_filesystem(self.disk(42))
+
     def test_powershell_clixml_is_reduced_to_readable_diagnostics(self) -> None:
         raw = (
             '#< CLIXML\n<Objs xmlns="http://schemas.microsoft.com/powershell/2004/04">'
@@ -1132,7 +1154,7 @@ class VhdxBackendAssessmentTests(unittest.TestCase):
 
         assessment = backend.assess(plan, devices)
 
-        self.assertEqual(assessment.status, UNSUPPORTED)
+        self.assertEqual(assessment.status, UNKNOWN)
         self.assertTrue(any("larger than 4 GiB" in item for item in assessment.blockers))
         self.assertIn("BLOCKED", assessment.dry_run_text)
 

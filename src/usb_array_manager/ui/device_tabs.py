@@ -33,11 +33,14 @@ from usb_array_manager.models.storage_device import StorageDevice
 from usb_array_manager.models.vhdx_probe import (
     VhdxBenchmarkComparison,
     VhdxProbeResult,
+    VhdxTogetherResult,
 )
 from usb_array_manager.ui.device_table_model import (
     BenchmarkTableModel,
     OverviewTableModel,
 )
+from usb_array_manager.ui.production_readiness import ProductionReadinessTab
+from usb_array_manager.services.production_planning import ProductionPlan
 
 
 def _configured_table(model) -> QTableView:
@@ -191,6 +194,7 @@ class BackendDeploymentTab(QWidget):
     backend_changed = Signal(str)
     probe_requested = Signal(int)
     probe_all_requested = Signal()
+    together_requested = Signal()
     performance_requested = Signal(int)
     performance_all_requested = Signal(int)
 
@@ -203,8 +207,8 @@ class BackendDeploymentTab(QWidget):
         title = QLabel("RAID backend capability and deployment dry run")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
         safety = QLabel(
-            f"Production deployment remains PREVIEW ONLY. Version {__version__} may create, "
-            "attach, benchmark, detach, and delete one temporary test VHDX only."
+            f"Production deployment remains PREVIEW ONLY. Version {__version__} uses "
+            "temporary test VHDXs only; four-member validation attaches four without benchmarking."
         )
         safety.setStyleSheet("color: #b00020; font-weight: 700;")
         safety.setWordWrap(True)
@@ -219,14 +223,15 @@ class BackendDeploymentTab(QWidget):
         status_row = QHBoxLayout()
         status_row.addWidget(QLabel("Backend:"))
         status_row.addWidget(self.backend_selector)
-        status_row.addWidget(QLabel("Deployment assessment:"))
+        status_row.addWidget(QLabel("Backend capability:"))
         status_row.addWidget(self.status)
-        status_row.addWidget(self.explanation, 1)
+        status_row.addStretch(1)
 
         self.vhdx_panel = QGroupBox("Temporary VHDX capability probe")
         self.vhdx_slot = QComboBox()
         self.probe_button = QPushButton("Probe VHDX Backend (8 GiB)")
         self.probe_all_button = QPushButton("Probe All 4")
+        self.together_button = QPushButton("Validate 4 VHDXs Together")
         self.performance_button = QPushButton("Run VHDX Performance Test")
         self.performance_button.setEnabled(False)
         self.performance_runs = QComboBox()
@@ -286,6 +291,10 @@ class BackendDeploymentTab(QWidget):
         slot_form.addRow("USB slot", self.vhdx_slot)
         probe_layout.addLayout(slot_form)
         probe_layout.addLayout(controls)
+        together_controls = QHBoxLayout()
+        together_controls.addWidget(self.together_button)
+        together_controls.addStretch(1)
+        probe_layout.addLayout(together_controls)
         probe_layout.addLayout(performance_controls)
         probe_details = QWidget()
         form = QFormLayout(probe_details)
@@ -326,7 +335,10 @@ class BackendDeploymentTab(QWidget):
         legend = QLabel("R / W / S = read / write / sustained write · speeds in MB/s")
         legend.setStyleSheet("color: #555;")
         legend.setWordWrap(True)
-        batch_layout.addWidget(legend)
+        performance_page = QWidget()
+        performance_layout = QVBoxLayout(performance_page)
+        performance_layout.setContentsMargins(0, 0, 0, 0)
+        performance_layout.addWidget(legend)
         self.performance_table = QTableWidget(0, 5)
         self.performance_table.setHorizontalHeaderLabels(
             ("Slot", "Runs", "Direct R / W / S", "VHDX R / W / S", "Avg overhead %")
@@ -343,12 +355,28 @@ class BackendDeploymentTab(QWidget):
             "Arithmetic mean of individual run overhead percentages: read / write / sustained write."
         )
         self.performance_table.setVisible(False)
-        batch_layout.addWidget(self.performance_table)
+        performance_layout.addWidget(self.performance_table)
+        self.together_table = QTableWidget(0, 7)
+        self.together_table.setHorizontalHeaderLabels(
+            ("Slot", "VHDX", "Disk", "Identity verified", "CanPool", "CannotPoolReason", "Status")
+        )
+        self.together_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.together_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.together_table.verticalHeader().setVisible(False)
+        together_header = self.together_table.horizontalHeader()
+        together_header.setStretchLastSection(False)
+        together_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        together_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.result_tables = QTabWidget()
+        self.result_tables.addTab(performance_page, "Performance averages")
+        self.result_tables.addTab(self.together_table, "Four-member validation")
+        batch_layout.addWidget(self.result_tables)
         for label in (self.batch_progress, self.batch_summary):
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.backend_selector.currentTextChanged.connect(self._backend_selected)
         self.probe_button.clicked.connect(self._emit_probe)
         self.probe_all_button.clicked.connect(lambda: self.probe_all_requested.emit())
+        self.together_button.clicked.connect(lambda: self.together_requested.emit())
         self.performance_button.clicked.connect(self._emit_performance)
         self.performance_all_button.clicked.connect(
             lambda: self.performance_all_requested.emit(
@@ -386,6 +414,8 @@ class BackendDeploymentTab(QWidget):
         self.preview.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
 
         self.deployment_tabs = QTabWidget()
+        self.production_readiness = ProductionReadinessTab()
+        self.deployment_tabs.addTab(self.production_readiness, "Production readiness")
         self.deployment_tabs.addTab(self.requirements, "Requirements / blockers")
         self.deployment_tabs.addTab(self.drive_table, "Disk mapping")
         self.deployment_tabs.addTab(self.preview, "Deployment preview")
@@ -407,6 +437,7 @@ class BackendDeploymentTab(QWidget):
         layout.addWidget(title)
         layout.addWidget(safety)
         layout.addLayout(status_row)
+        layout.addWidget(self.explanation)
         layout.addWidget(self.workspace_splitter, 1)
 
     def set_assessments(
@@ -421,6 +452,9 @@ class BackendDeploymentTab(QWidget):
         self.backend_selector.setCurrentText(selected_name)
         self.backend_selector.blockSignals(False)
         self._backend_selected(self.backend_selector.currentText())
+
+    def set_production_plan(self, plan: ProductionPlan) -> None:
+        self.production_readiness.set_plan(plan)
 
     def set_devices(self, devices: tuple[StorageDevice, ...] | list[StorageDevice]) -> None:
         previous = self.vhdx_slot.currentData()
@@ -478,6 +512,45 @@ class BackendDeploymentTab(QWidget):
             + self.performance_table.frameWidth() * 2
         )
         self.performance_table.setVisible(bool(results))
+        self.result_tables.setCurrentIndex(0)
+
+    def show_together_started(self) -> None:
+        self.together_table.setRowCount(0)
+        self.result_tables.setCurrentIndex(1)
+        self.set_probe_batch_summary(["Validating four temporary VHDXs together."])
+
+    def set_together_result(self, result: VhdxTogetherResult) -> None:
+        self.together_table.setRowCount(len(result.members))
+        for row, member in enumerate(result.members):
+            disk = member.disk
+            values = (
+                f"Slot {member.slot}", f"temp slot{member.slot}",
+                f"Disk {disk.disk_number}" if disk else "—",
+                "Yes" if member.identity_verified else "No",
+                str(disk.can_pool) if disk and disk.can_pool is not None else "Unknown",
+                disk.pool_rejection_details if disk and disk.can_pool is False else "—",
+                member.status,
+            )
+            details = (
+                f"{member.vhdx_path}\n{member.reason}\nCleanup: {member.cleanup_status}"
+                + (f"\nLeftover: {member.leftover_path}; may remain attached={member.may_remain_attached}" if member.leftover_path else "")
+                + (f"\nUniqueId: {disk.storage_unique_id}; DeviceId: {disk.storage_device_id}; ObjectId: {disk.storage_object_id}" if disk else "")
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(details)
+                self.together_table.setItem(row, column, item)
+        self.together_table.setFixedHeight(
+            self.together_table.horizontalHeader().sizeHint().height()
+            + self.together_table.verticalHeader().defaultSectionSize() * max(1, len(result.members))
+            + self.together_table.frameWidth() * 2
+        )
+        self.result_tables.setCurrentIndex(1)
+        leftovers = [
+            f"Slot {member.slot}: {member.leftover_path} — {member.cleanup_status}"
+            for member in result.members if member.leftover_path or member.may_remain_attached
+        ]
+        self.set_probe_batch_summary([f"{result.status}: {result.explanation}", *leftovers])
 
     def set_probe_result(self, result: VhdxProbeResult) -> None:
         index = self.vhdx_slot.findData(result.slot)
@@ -541,6 +614,7 @@ class BackendDeploymentTab(QWidget):
         is_vhdx = name == "VHDX-backed Storage Spaces"
         self.vhdx_panel.setVisible(is_vhdx)
         self.batch_panel.setVisible(is_vhdx)
+        self.deployment_tabs.setTabVisible(0, is_vhdx)
         self.backend_changed.emit(name)
 
     def _emit_probe(self) -> None:
@@ -572,6 +646,9 @@ class BackendDeploymentTab(QWidget):
             )
         )
         self.probe_all_button.setEnabled(
+            not self._probe_running and self.vhdx_slot.count() == 4
+        )
+        self.together_button.setEnabled(
             not self._probe_running and self.vhdx_slot.count() == 4
         )
         self.performance_all_button.setEnabled(
@@ -628,10 +705,9 @@ class BackendDeploymentTab(QWidget):
                 "No capability blockers were reported. A future release would still "
                 "require a new safety review and explicit destructive confirmation."
             )
-        sections.append("<b>Planned operations by drive</b>")
         for drive in assessment.drives:
             sections.append(
-                f"<b>Slot {drive.slot}</b><ul>"
+                f"<p><b>Planned operations by drive — Slot {drive.slot}</b></p><ul>"
                 + "".join(f"<li>{escape(item)}</li>" for item in drive.operations)
                 + "</ul>"
             )

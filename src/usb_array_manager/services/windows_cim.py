@@ -7,7 +7,7 @@ import subprocess
 from collections.abc import Mapping
 from typing import Any
 
-from usb_array_manager.models.storage_device import StorageDevice
+from usb_array_manager.models.storage_device import HostVolume, StorageDevice
 
 
 class DeviceDetectionError(RuntimeError):
@@ -40,6 +40,9 @@ catch {
 }
 
 $systemDrive = $null
+$hostVolumes = @()
+try { $hostVolumes = @(Get-CimInstance -ClassName Win32_Volume -ErrorAction Stop) }
+catch { $hostVolumes = @() }
 try {
     $systemDrive = (Get-CimInstance -ClassName Win32_OperatingSystem).SystemDrive
 }
@@ -193,6 +196,22 @@ $devices = @(
                 partition_count = $partitions.Count
                 partition_style = if ($storageDisk) { $storageDisk.PartitionStyle } else { $null }
                 filesystem_types = $fileSystems
+                host_volumes = @($logicalDisks | ForEach-Object {
+                    $logical = $_
+                    $matches = @($hostVolumes | Where-Object { $_.DriveLetter -eq $logical.DeviceID })
+                    # Keep every match: ambiguity is rejected by the production planner.
+                    foreach ($volume in $matches) {
+                        [PSCustomObject]@{
+                            identity = $volume.DeviceID
+                            drive_letter = $logical.DeviceID
+                            filesystem = $volume.FileSystem
+                            capacity_bytes = $volume.Capacity
+                            free_bytes = $volume.FreeSpace
+                            is_system = $volume.SystemVolume
+                            is_boot = $volume.BootVolume
+                        }
+                    }
+                })
                 operational_status = if ($storageDisk) { $storageDisk.OperationalStatus } else { $disk.Status }
             }
         }
@@ -376,6 +395,19 @@ def _record_to_device(record: Mapping[str, Any]) -> StorageDevice:
             if (filesystem := _clean_text(value)) is not None
         ),
         operational_status=_enum_or_list_text(record.get("operational_status")),
+        host_volumes=tuple(
+            HostVolume(
+                identity=_clean_text(volume.get("identity")),
+                drive_letter=_clean_text(volume.get("drive_letter")),
+                filesystem=_clean_text(volume.get("filesystem")),
+                capacity_bytes=_optional_int(volume.get("capacity_bytes")),
+                free_bytes=_optional_int(volume.get("free_bytes")),
+                is_system=_optional_bool(volume.get("is_system")),
+                is_boot=_optional_bool(volume.get("is_boot")),
+            )
+            for volume in _list_value(record.get("host_volumes"))
+            if isinstance(volume, Mapping)
+        ),
     )
 
 
