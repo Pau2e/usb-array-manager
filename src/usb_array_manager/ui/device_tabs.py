@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from html import escape
 
-from usb_array_manager import __version__
-
 from PySide6.QtCore import QDateTime, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -28,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from usb_array_manager import __version__
 from usb_array_manager.models.raid_backend import SUPPORTED, BackendAssessment
 from usb_array_manager.models.storage_device import StorageDevice
 from usb_array_manager.models.vhdx_probe import (
@@ -35,12 +34,13 @@ from usb_array_manager.models.vhdx_probe import (
     VhdxProbeResult,
     VhdxTogetherResult,
 )
+from usb_array_manager.services.production_planning import ProductionPlan
 from usb_array_manager.ui.device_table_model import (
     BenchmarkTableModel,
     OverviewTableModel,
 )
+from usb_array_manager.ui.host_preparation import HostPreparationPage
 from usb_array_manager.ui.production_readiness import ProductionReadinessTab
-from usb_array_manager.services.production_planning import ProductionPlan
 
 
 def _configured_table(model) -> QTableView:
@@ -207,8 +207,8 @@ class BackendDeploymentTab(QWidget):
         title = QLabel("RAID backend capability and deployment dry run")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
         safety = QLabel(
-            f"Production deployment remains PREVIEW ONLY. Version {__version__} uses "
-            "temporary test VHDXs only; four-member validation attaches four without benchmarking."
+            f"Production deployment remains PREVIEW ONLY. Version {__version__} adds separately confirmed "
+            "destructive host preparation. VHDX tests remain temporary."
         )
         safety.setStyleSheet("color: #b00020; font-weight: 700;")
         safety.setWordWrap(True)
@@ -432,13 +432,17 @@ class BackendDeploymentTab(QWidget):
         self.workspace_splitter.setStretchFactor(0, 2)
         self.workspace_splitter.setStretchFactor(1, 3)
         self.workspace_splitter.setSizes((480, 720))
+        self.host_preparation = HostPreparationPage()
+        self.workflow_tabs = QTabWidget()
+        self.workflow_tabs.addTab(self.workspace_splitter, "Evaluation / deployment preview")
+        self.workflow_tabs.addTab(self.host_preparation, "Host Preparation")
 
         layout = QVBoxLayout(self)
         layout.addWidget(title)
         layout.addWidget(safety)
         layout.addLayout(status_row)
         layout.addWidget(self.explanation)
-        layout.addWidget(self.workspace_splitter, 1)
+        layout.addWidget(self.workflow_tabs, 1)
 
     def set_assessments(
         self,

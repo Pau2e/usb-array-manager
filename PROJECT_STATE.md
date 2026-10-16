@@ -2,7 +2,156 @@
 
 ## Current version
 
-**v0.7.5.3**
+**v0.8.0**
+
+Host Preparation interaction fix: enabled buttons previously disagreed with the
+handlers' inventory-scan guard, causing enabled clicks to be silently discarded.
+Accepted workers also showed no initial progress during their slow Windows query.
+The page now tracks scan, external busy and active-action states separately,
+snapshots selectedRows rather than stale currentRow, updates on selection/current
+cell changes, and updates existing table items with signals blocked during refresh.
+Accepted actions immediately show Rechecking/Recording/Reviewing text and disable
+competing controls. Duplicates/invalid requests get visible reasons; completion,
+failure, cancellation and worker-start failure restore state without another click.
+Post-format validation has a UI wrapper with progress, cleanup of UI state and an
+explicit four-PREPARED prerequisite; existing probe execution remains unchanged.
+Full suite: **291 tests passed**, including ten new interaction tests using mouse,
+keyboard, stale-current-index selection, scan lifecycle, blocked workers plus GUI
+heartbeat, duplicate requests and success/failure/cancellation. No real disk actions
+were run. Formatting service/safeguards and frozen 8192 MiB probe remain unchanged.
+
+Dirty-filesystem destructive-format policy (2026-10-16): a fresh read-only query
+confirmed physical disks Healthy/Online, Win32 status OK, for all four members.
+Slots 1/2/4 have filesystem-only Warning/Full Repair Needed with both dirty flags;
+Slot 3 is clean. The narrow, fully evidenced FAT32 pattern can now enter review
+with status FILESYSTEM DIRTY — DESTRUCTIVE FORMAT MAY CONTINUE WITH EXTRA
+ACKNOWLEDGEMENT. A separate unchecked checkbox acknowledges inconsistent filesystem,
+damaged/unrecoverable data, and destruction of that filesystem. Backup and typed
+confirmation remain mandatory. Unknown, conflicting or missing warning provenance,
+physical health problems, identity ambiguity and protected disks still block.
+Health evidence is bound to confirmation; final Windows checks enforce disk health,
+volume state, uniqueness and exclusions again. Post-format NTFS must remain Healthy.
+No auto repair, dirty-bit clear, formatting or production deployment was executed.
+Live read-only policy check reproduced the three conditional reviews and one READY;
+real slots.json and host_preparation.json bytes were verified unchanged. Frozen
+VHDX probe, simultaneous validation and Storage Spaces backend remain unchanged.
+Verification after the policy change: full suite **281 tests passed**; Python
+compilation, focused static checks and whitespace checks passed. Synthetic Windows
+guard tests prove acknowledged dirty dispatch, refusal without acknowledgement,
+missing dirty evidence, physical warning, and health changes at final dispatch.
+
+The following records describe the earlier audits before that policy revision.
+
+Health-source audit / diagnostic visibility: the observed BLOCKED state on Slots
+1, 2 and 4 is legitimate safety behavior. Get-Volume and direct MSFT_Volume return
+health Warning (underlying HealthStatus=1), OperationalStatus Full Repair Needed
+(53263 / 0xD00F), and Win32_Volume.DirtyBitSet / Win32_LogicalDisk.VolumeDirty true.
+Slot 3 returns Healthy (0), operational OK (2), both dirty flags false. All hosts
+are mounted FAT32 and query providers agree; no query errors or fallback produced
+the Warning. Win32_Volume.Status itself is null for all four and is not selected.
+
+Disk OK comes from Win32_DiskDrive.Status. Get-Disk and Get-PhysicalDisk both report
+Healthy (raw 0), but the existing Find-PhysicalDisk rejects the latter's slightly
+different size observations and retains the Win32 fallback. No relaxed matching
+or Storage Spaces/probe change was made. Health codes and operational codes are
+distinct; the app currently blocks on normalized volume health outside HEALTHY/OK,
+not by remapping dirty/operational data. No media-failure conclusion was drawn.
+
+Inventory now carries immutable JSON health-provenance packets through the existing
+models. Host Preparation exposes them in Raw health / decision (read-only), with
+separate changed-only logs. Missing legacy provenance is labelled unavailable;
+it never creates a dirty-bit or API claim. The health acceptance condition and
+formatter are unchanged. The larger JSON serialization retains nested raw values
+and its encoded inventory command is tested below the Windows command-length limit.
+
+Verification: 271 tests passed, including 10 new health-provenance tests. Live
+read-only inventory reproduced raw codes, normalization and existing decisions.
+No real formatting, scan/repair, dirty-bit clear, VHDX lifecycle, pool creation or
+slot-identity upgrade occurred. Current slots.json bytes stayed unchanged during
+the audit. Frozen VHDX probe, simultaneous validation and backend files are unchanged.
+
+Identity-reconciliation fix (2026-10-16): the initial v0.8.0 matcher wrongly required
+a nonempty storage_unique_id. This field existed but was optional in v0.7.5.3;
+all four actual saved/current values are null. Saved PnP, USB parent, container,
+serial and byte capacity each match one current physical member. No normalization
+mismatch was the cause. Zero matches were also incorrectly labelled AMBIGUOUS.
+
+The preparation proof now has explicit PROVEN MATCH / NO MATCH / AMBIGUOUS MATCH
+results. It requires a complete saved storage-ID/PnP/serial chain or complete
+USB-parent/container/PnP/serial chain, model/capacity corroboration, no missing/
+conflicting saved evidence, and uniqueness across current members and reservations.
+The new physical_identity.py is a pure policy over the existing StorageDevice
+model; no second inventory implementation exists. Serial/instance-ID distinctions
+are preserved while case, outer whitespace and valid GUID braces are normalized.
+
+Read-only details/logging show normalized comparisons and rejection reasons;
+unchanged diagnostics are not logged repeatedly. Explicit legacy-proof recording
+adds versioned preparation_identity metadata only after re-query and unique proof.
+Original identity/snapshots are preserved; an unavailable Storage UniqueId stays
+unavailable. Diagnostic scans never save upgrades. The formatter independently
+rejects an unproven physical identity even if typed confirmation data is supplied.
+
+Actual read-only audit: all four physical matches PROVEN; Slots 1, 2 and 4 remain
+BLOCKED by host-volume health Warning. Slot 3 is READY FOR PREPARATION. All remain
+FAT32 and 0/4 PREPARED. Initial application-path exclusions pass on the captured
+inventory, but final Windows backing-disk checks are deliberately not run by
+identity diagnostics and remain required before any future format. No formatting,
+conversion, initialization, VHDX operation or real saved-slot upgrade was performed.
+
+Fix verification: complete suite **261 tests passed**, including 17 new identity
+reconciliation tests. Proven 8 GiB VHDX services remain unchanged. The real
+slots.json SHA256 matches the file captured at the beginning of the investigation.
+
+Scope: Safe Host Preparation only. Backend / Deployment now has a separated Host
+Preparation page with all four members, details, per-slot persistent stages,
+read-only Recheck, and an explicitly confirmed FAT32 → NTFS format worker.
+Backup acknowledgement is per member and unchecked; exact typed confirmation is
+required. Backup verification/copy/restoration are not implemented or claimed.
+There is no Format All or automatic continuation to another member.
+
+The existing StorageDevice/HostVolume detector and SlotStore identities are reused.
+Slot assignments retain preparation_reference so routine reconciliation cannot
+replace the safety baseline. Preparation compares all saved strong anchors,
+serial/model/capacity and current associations; conflict, ambiguity or unknown
+protection blocks. The Windows adapter reruns the existing inventory inside its
+process, checks protected path backing disks and exact partition/volume objects,
+and formats only the verified volume CIM object. No repartitioning or disk clean
+path exists. Administrator rights and a working Storage provider are required.
+
+The worker journals FORMATTING before dispatch, then REDISCOVERING, REVALIDATING
+and PREPARED only from observed results. Physical identity owns the slot; old
+Volume GUIDs are historical and current NTFS GUID/capacity/free space are queried
+again. Failed/unfinished work requires explicit read-only review and never triggers
+automatic format retry. App UI jobs are serialized; an interprocess store lock
+and Windows helper lock preserve the single-member boundary even when the helper
+outlives a forcibly closed GUI. Stage records live beside slots.json in
+host_preparation.json. Persistent PREPARED is checked against current inventory.
+
+The page derives a fresh post-format size with the unchanged v0.7.5.3 formula.
+All four prepared hosts are required for its next-validation action. Earlier
+four-member proof is invalidated before preparation/recheck. Successful subsequent
+validation records timestamp/generation/new host snapshots for audit only; fresh
+session evidence remains mandatory. Host changes invalidate session proof even
+if later reverted. The existing legacy capability controls remain available.
+
+Frozen: 8192 MiB temporary dynamic probes, VHDX identity/CanPool/cleanup services,
+four-member temporary lifecycle, benchmark/sequential averaging and shared planner.
+Production creation, pool/mirror/final-volume creation and startup persistence are
+NOT IMPLEMENTED. Existing production command text remains PREVIEW ONLY.
+
+Implementation checks use fake formatting/inventory, synthetic Windows PowerShell
+storage functions and UI tests. No live physical formatting, VHDX probe, pool or
+startup configuration was executed. Actual host migration/hardware acceptance
+is not yet verified. See README for the user workflow and limits.
+
+Verification on 2026-10-16: complete unittest suite **244 tests passed** (the 216
+baseline tests plus 28 host-preparation tests). Compilation, selected unused/
+undefined-code checks and git whitespace checks passed. Runtime and installed
+editable package metadata both report 0.8.0. Host Preparation was visually checked
+with synthetic members at 1280×720 and 1366×768. The vhdx_probe.py,
+vhdx_together.py and raid_backend.py implementations have no changes from baseline.
+
+## Historical v0.7.5.3 checkpoint
 
 Version 0.7 milestone closed on 2026-10-13 at the user's request. This checkpoint
 includes all completed changes through v0.7.5.3. Production deployment remains

@@ -3,7 +3,135 @@
 A Windows desktop application that inventories connected USB storage devices,
 maps them to persistent logical slots, and safely benchmarks mounted filesystems.
 
-## Version 0.7.5.3 — Conservative sizing and separate inventory/benchmark tabs
+## Version 0.8.0 — Confirmed USB host preparation
+
+**Host Preparation actions:** a valid click snapshots the selected logical slot
+and immediately shows the action in progress. The active action and competing
+controls stay disabled until completion. Inventory scans visibly disable host
+actions; completion restores eligibility automatically. Duplicate/concurrent
+requests display a reason instead of being silently discarded. Mouse/keyboard
+selection updates eligibility immediately, and inventory updates preserve selection.
+Post-format four-member validation still requires all four hosts PREPARED.
+
+**Raw health diagnostics:** Host Preparation → **Raw health / decision (read-only)**
+shows the selected Windows API/property, raw health code/text, operational state,
+Win32 volume/logical-disk dirty flags and the final normalized decision. Logs record
+only changed diagnostics. This view performs no scan, repair, dirty-bit clearing,
+format or preparation, and does not alter the safety gate.
+
+Read-only health audit: Slots 1, 2 and 4 currently report Get-Volume health Warning
+(raw CIM code 1), Full Repair Needed (53263), and both dirty flags true. Slot 3
+reports Healthy (0), OK (2), dirty flags false. Direct MSFT_Volume agrees. Warning
+is a genuine provider result; unknown/missing health is not invented as Warning.
+For destructive format only, a fully observed FAT32 dirty/Full Repair Needed
+warning is now classified **FILESYSTEM DIRTY — DESTRUCTIVE FORMAT MAY CONTINUE
+WITH EXTRA ACKNOWLEDGEMENT**. It requires Get-Disk Healthy/Online (raw 0/53264),
+volume Warning/Full Repair Needed (1/53263), both dirty flags true, a unique mounted
+volume association and no provider errors/conflicts. Unknown or different warnings
+remain blocked. The volume stays Warning and does not become PREPARED.
+
+The confirmation dialog requires a separate unchecked acknowledgement that the
+filesystem may be inconsistent, existing data may be damaged/unrecoverable, and
+formatting destroys that filesystem anyway. Backup acknowledgement and the exact
+typed phrase are still required. Changed health evidence requires a fresh review.
+Final Windows checks enforce physical health, the narrow acknowledged exception,
+physical identity and all protected-path exclusions immediately before dispatch.
+Healthy NTFS remains mandatory after formatting. No repair or dirty-bit clear runs.
+
+Disk OK
+comes from Win32_DiskDrive.Status because the existing physical-disk matcher rejects
+slightly different Storage-provider capacities. That selection policy remains
+unchanged. These readings alone do not prove hardware/media failure or explain
+why the dirty bits were set. No filesystem repair was attempted.
+
+The v0.8.0 physical-identity reconciliation fix supports the actual v0.7.x records
+where Storage UniqueId was saved as null. That optional provider field is not
+invented or required unconditionally. A complete saved PnP + serial + storage-ID
+chain, or a complete saved PnP + serial + USB-parent + valid-container chain,
+must uniquely match, with model/capacity corroboration and no conflicting saved
+strong evidence. Zero candidates is NO MATCH; multiple candidates or shared strong
+anchors is AMBIGUOUS. Both block. Letters, disk numbers and Volume GUIDs never
+establish the physical match. Harmless case/padding/GUID-brace differences are
+normalized; distinguishing serial/instance-ID characters are retained.
+
+Host Preparation's **Identity reconciliation (read-only)** details show saved
+evidence, candidate counts, field comparisons and rejection reasons. Logs update
+only when those diagnostics change. **Record proven legacy identity (no USB
+changes)** is an explicit metadata-only action after a fresh unique proof. It
+preserves the original records, records the proof policy/evidence, and captures a
+new Storage UniqueId only if Windows actually supplies one. Diagnostics do not
+automatically upgrade records. A physical match alone does not bypass volume
+health, system/boot or application/state exclusions. The final Windows backing-
+disk check remains mandatory immediately before formatting.
+
+Read-only audit on 2026-10-16 found a unique physical proof for all four saved
+members. Under the revised destructive-format policy, Slots 1, 2 and 4 qualify
+only for the extra-acknowledgement review; Slot 3 is READY FOR PREPARATION.
+All remain FAT32, 0/4 PREPARED. The policy does not suppress or repair warnings.
+The user's saved slots and USB filesystems were left unchanged by the audit.
+
+Open **Backend / Deployment → Host Preparation** to inspect all four assigned
+members, their complete physical/volume identities, health and preparation state.
+This version can **erase one explicitly confirmed FAT32 USB host volume and
+format it to NTFS**. Run the application as administrator for that operation.
+
+Select one member, review its identity and destructive warning, acknowledge
+**“I have backed up or intentionally do not need the data on this USB member”**,
+then type its exact phrase, such as **FORMAT SLOT 1**. The checkbox starts
+unchecked. Backup is acknowledged, not verified; this version does not copy or
+restore data. Keep backups independently and restore needed files yourself before
+relying on a production capacity estimate. No Format All or automatic next member
+exists. Cancel leaves the member untouched.
+
+Preparation reuses the existing CIM/StorageDevice/HostVolume inventory and saved
+slot identity. Assignment-time evidence survives ordinary slot reconciliation.
+It rejects weak/conflicting/duplicate identities, unexpected capacity, non-USB or
+non-removable media, unknown health/protection, and system/boot/application/state
+disks. A final Windows-side inventory and partition/volume association check must
+still match the confirmed target. Formatting receives an exact verified volume
+CIM object, never a blindly selected drive letter or disk number. The Storage
+provider must work for this destructive operation; provider failure blocks it.
+
+After Windows confirms formatting, the worker queries the same physical member
+again, discards the old GUID as authority, verifies one healthy NTFS host, and
+records the freshly observed GUID, capacity and free space. A changed letter is
+acceptable. Formatting/rediscovery failures stop that member; they never retry
+format or advance to another member. Use **Recheck selected host (read-only)**
+after manually reviewing a failed/interrupted operation, or to revalidate an
+existing NTFS member. Recheck records current identity; it performs no storage
+mutation and does not verify restored user files.
+
+Per-slot stages and logs persist in `Documents\USBArrayManager\host_preparation.json`.
+An interrupted stage appears as NEEDS REVIEW. Current inventory must still match
+persisted PREPARED evidence after restart. A background worker and shared UI busy
+boundary serialize preparation with benchmarks/probes. Closing waits for the
+worker; a separate Windows helper lock blocks another preparation/recheck while a
+surviving format process remains active. There is no forced format cancellation.
+
+The page reports 0/4 through 4/4 PREPARED. When all four current hosts are verified
+NTFS, it displays **POST-FORMAT PRODUCTION ESTIMATE** using fresh capacities/free
+space and the existing conservative reserve/overhead/256 MiB rounding policy.
+Refreshing after restoring files rechecks free-space readiness. It never assumes
+26 GiB or that existing data can be reclaimed.
+
+Preparation invalidates prior four-member proof. Run the existing **four-member
+8 GiB validation** again after all hosts are prepared. Its timestamp, preparation
+generation and new host evidence are recorded for audit; current capability proof
+remains session-only and cannot be restored from the JSON file after restart.
+Host/layout changes invalidate proof again, including a change later reverted.
+
+**Production VHDX creation, Storage Spaces pool/mirror creation, final filesystem
+creation and startup auto-attach remain NOT IMPLEMENTED.** Their command views
+remain PREVIEW ONLY. The temporary 8192 MiB dynamic capability probes, CanPool
+matching, VHDX lifecycle/cleanup and sequential benchmark paths are unchanged.
+
+Validation uses simulated formatting and fake storage objects, including real
+Windows PowerShell parsing and synthetic dispatch guards. No physical USB format
+or live VHDX hardware test was performed during implementation. Live preparation
+and post-format hardware acceptance remain to be verified by a deliberate user
+workflow; the tests do not establish live hardware success.
+
+## Historical release 0.7.5.3 — Conservative sizing and separate inventory/benchmark tabs
 
 Production VHDX sizing uses the smallest usable host volume. Reserve
 **max(2 GiB, 8% of that capacity)** as host filesystem working space, add

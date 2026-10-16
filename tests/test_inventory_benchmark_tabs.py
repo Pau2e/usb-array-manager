@@ -146,11 +146,11 @@ class InventoryBenchmarkTabTests(unittest.TestCase):
         self.assertTrue(self.window._assign_slot_button.isEnabled())
 
     def test_current_runtime_package_and_project_versions_match(self):
-        self.assertEqual(__version__, "0.7.5.3")
-        self.assertIn("USB Array Manager 0.7.5.3", self.window.windowTitle())
-        self.assertEqual(importlib.metadata.version("usb-array-manager"), "0.7.5.3")
+        self.assertEqual(__version__, "0.8.0")
+        self.assertIn("USB Array Manager 0.8.0", self.window.windowTitle())
+        self.assertEqual(importlib.metadata.version("usb-array-manager"), "0.8.0")
         project = Path(__file__).resolve().parents[1]
-        self.assertEqual(tomllib.loads((project / "pyproject.toml").read_text())["project"]["version"], "0.7.5.3")
+        self.assertEqual(tomllib.loads((project / "pyproject.toml").read_text())["project"]["version"], "0.8.0")
         self.assertNotIn("0.7.5.2", self.window.windowTitle())
 
     def test_switching_tabs_preserves_results_slots_selection_and_models(self):

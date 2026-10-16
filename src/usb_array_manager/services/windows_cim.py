@@ -24,22 +24,30 @@ $canReadPnpProperties = $null -ne (
 # The Storage provider can be unavailable or broken on otherwise working systems.
 # Missing provider data is handled per field instead of failing the whole USB scan.
 $physicalDisks = @()
+$physicalQueryError = $null
 try {
     $physicalDisks = @(Get-PhysicalDisk -ErrorAction Stop)
 }
 catch {
     $physicalDisks = @()
+    $physicalQueryError = $_.Exception.Message
 }
 
 $storageDisks = @()
+$diskQueryError = $null
 try {
     $storageDisks = @(Get-Disk -ErrorAction Stop)
 }
 catch {
     $storageDisks = @()
+    $diskQueryError = $_.Exception.Message
 }
 
 $systemDrive = $null
+$storageVolumes = @()
+$volumeQueryError = $null
+try { $storageVolumes = @(Get-Volume -ErrorAction Stop) }
+catch { $storageVolumes = @(); $volumeQueryError = $_.Exception.Message }
 $hostVolumes = @()
 try { $hostVolumes = @(Get-CimInstance -ClassName Win32_Volume -ErrorAction Stop) }
 catch { $hostVolumes = @() }
@@ -58,6 +66,23 @@ function Get-NormalizedIdentityText {
     }
 
     return (([string]$Value -replace '[\x00-\x1F\x7F]', '').Trim().ToUpperInvariant())
+}
+
+function Get-RawCimValue($obj, $name) {
+    if ($null -ne $obj -and $obj.CimInstanceProperties) {
+        $p = $obj.CimInstanceProperties[$name]
+        if ($null -ne $p) { return $p.Value }
+    }
+    return $null
+}
+function Get-HealthView($obj) {
+    if ($null -eq $obj) { return $null }
+    [PSCustomObject]@{
+        health_value = $obj.HealthStatus
+        health_cim_raw = (Get-RawCimValue $obj 'HealthStatus')
+        operational_value = @($obj.OperationalStatus)
+        operational_cim_raw = @(Get-RawCimValue $obj 'OperationalStatus')
+    }
 }
 
 function Find-PhysicalDisk {
@@ -173,6 +198,24 @@ $devices = @(
                 media_type     = if ($physicalDisk) { $physicalDisk.MediaType } else { $disk.MediaType }
                 can_pool       = if ($physicalDisk) { $physicalDisk.CanPool } else { $null }
                 health_status  = if ($physicalDisk) { $physicalDisk.HealthStatus } else { $disk.Status }
+                health_diagnostics = [PSCustomObject]@{
+                    source = if ($physicalDisk) { 'Get-PhysicalDisk.HealthStatus' } else { 'Win32_DiskDrive.Status' }
+                    selected_raw = if ($physicalDisk) { $physicalDisk.HealthStatus } else { $disk.Status }
+                    win32_status = $disk.Status
+                    get_disk = (Get-HealthView $storageDisk)
+                    get_disk_error = $diskQueryError
+                    get_physical_disk_error = $physicalQueryError
+                    physical_selection = 'number+exact-size, then serial+exact-size; no relaxed matching'
+                    win32_size = $disk.Size
+                    physical_candidates = @($physicalDisks | Where-Object {
+                        [string]$_.DeviceId -eq [string]$disk.Index -or
+                        ((Get-NormalizedIdentityText $_.SerialNumber) -and
+                         (Get-NormalizedIdentityText $_.SerialNumber) -eq (Get-NormalizedIdentityText $disk.SerialNumber))
+                    } | ForEach-Object { [PSCustomObject]@{
+                        device_id=$_.DeviceId; size=$_.Size; size_matches=($_.Size -eq $disk.Size)
+                        health=(Get-HealthView $_)
+                    } })
+                }
                 storage_unique_id = if ($physicalDisk) { $physicalDisk.UniqueId } else { $null }
                 storage_unique_id_format = if ($physicalDisk) { $physicalDisk.UniqueIdFormat } else { $null }
                 container_id   = $containerId
@@ -201,6 +244,7 @@ $devices = @(
                     $matches = @($hostVolumes | Where-Object { $_.DriveLetter -eq $logical.DeviceID })
                     # Keep every match: ambiguity is rejected by the production planner.
                     foreach ($volume in $matches) {
+                        $sv = @($storageVolumes | Where-Object { $_.Path -eq $volume.DeviceID })
                         [PSCustomObject]@{
                             identity = $volume.DeviceID
                             drive_letter = $logical.DeviceID
@@ -209,6 +253,24 @@ $devices = @(
                             free_bytes = $volume.FreeSpace
                             is_system = $volume.SystemVolume
                             is_boot = $volume.BootVolume
+                            health_status = $(
+                                if ($sv.Count -eq 1) { [string]$sv[0].HealthStatus }
+                                else { [string]$volume.Status }
+                            )
+                            health_diagnostics = [PSCustomObject]@{
+                                source = if ($sv.Count -eq 1) { 'Get-Volume.HealthStatus' } else { 'Win32_Volume.Status' }
+                                selected_raw = if ($sv.Count -eq 1) { [string]$sv[0].HealthStatus } else { [string]$volume.Status }
+                                storage_match_count = $sv.Count
+                                storage = if ($sv.Count -eq 1) { Get-HealthView $sv[0] } else { $null }
+                                storage_query_error = $volumeQueryError
+                                win32_status = $volume.Status
+                                dirty_bit_set = $volume.DirtyBitSet
+                                logical_disk_dirty = $logical.VolumeDirty
+                                file_system = $volume.FileSystem
+                                file_system_type_raw = if ($sv.Count -eq 1) { Get-RawCimValue $sv[0] 'FileSystemType' } else { $null }
+                                drive_letter = $logical.DeviceID
+                                automount = $volume.Automount
+                            }
                         }
                     }
                 })
@@ -217,7 +279,7 @@ $devices = @(
         }
 )
 
-ConvertTo-Json -InputObject $devices -Depth 4 -Compress
+ConvertTo-Json -InputObject $devices -Depth 8 -Compress
 """
 
 _VID_PID_PATTERN = re.compile(
@@ -370,6 +432,7 @@ def _record_to_device(record: Mapping[str, Any]) -> StorageDevice:
         media_type=_enum_text(record.get("media_type"), _MEDIA_TYPES),
         can_pool=_optional_bool(record.get("can_pool")),
         health_status=_enum_text(record.get("health_status"), _HEALTH_STATUSES),
+        health_details_json=_health_details_json(record.get("health_diagnostics")),
         usb_device_id=usb_device_id,
         storage_unique_id=_clean_text(record.get("storage_unique_id")),
         storage_unique_id_format=_clean_text(
@@ -404,11 +467,18 @@ def _record_to_device(record: Mapping[str, Any]) -> StorageDevice:
                 free_bytes=_optional_int(volume.get("free_bytes")),
                 is_system=_optional_bool(volume.get("is_system")),
                 is_boot=_optional_bool(volume.get("is_boot")),
+                health_status=_enum_text(volume.get("health_status"), _HEALTH_STATUSES),
+                health_details_json=_health_details_json(volume.get("health_diagnostics")),
             )
             for volume in _list_value(record.get("host_volumes"))
             if isinstance(volume, Mapping)
         ),
     )
+
+
+def _health_details_json(value: Any) -> str | None:
+    """Immutable raw evidence; never interpreted as a normalized health result."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":")) if isinstance(value, Mapping) else None
 
 
 def _clean_text(value: Any) -> str | None:

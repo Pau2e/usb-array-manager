@@ -9,7 +9,6 @@ from typing import Any
 
 from usb_array_manager.models.storage_device import StorageDevice
 
-
 SLOT_COUNT = 4
 SCHEMA_VERSION = 1
 _IDENTITY_MATCH_ORDER = (
@@ -76,8 +75,14 @@ class SlotStore:
 
             matched_slots.add(slot)
             updated_record = {
+                **assignments[slot],
                 "identity": identities[index],
                 "last_known_device": _snapshot_from_device(device),
+                # Keep assignment-time evidence for destructive preparation even
+                # as ordinary inventory reconciliation refreshes its snapshot.
+                "preparation_reference": assignments[slot].get(
+                    "preparation_reference", assignments[slot]["last_known_device"]
+                ),
             }
             if assignments.get(slot) != updated_record:
                 assignments[slot] = updated_record
@@ -118,12 +123,61 @@ class SlotStore:
             assignments[slot] = {
                 "identity": _identity_from_device(device),
                 "last_known_device": _snapshot_from_device(device),
+                "preparation_reference": _snapshot_from_device(device),
             }
 
         self._save_assignments(assignments)
 
     def reserved_slots(self) -> set[int]:
         return set(self._load_assignments())
+
+    def preparation_reference(self, slot: int) -> StorageDevice:
+        """Assignment evidence, never refreshed from a weaker inventory match."""
+        record = self.preparation_record(slot)
+        snapshot = record.get("preparation_reference", record["last_known_device"])
+        proof = record.get("preparation_identity")
+        if proof is not None:
+            if not isinstance(proof, dict) or proof.get("policy_version") != 1 or not isinstance(proof.get("reference"), dict):
+                raise SlotStoreError("Unrecognized preparation identity proof; explicit review required.")
+            snapshot = proof["reference"]
+        return replace(_device_from_snapshot(snapshot), slot=slot)
+
+    def preparation_record(self, slot: int) -> dict[str, Any]:
+        """Read without reconciliation, migration or saved-file mutation."""
+        if not self.path.exists():
+            raise SlotStoreError("No saved slot file; assign/review slots explicitly first.")
+        assignments = self._read_assignments(self.path)
+        if slot not in assignments:
+            raise SlotStoreError(f"Slot {slot} is not assigned.")
+        return assignments[slot]
+
+    def record_preparation_identity(self, slot: int, devices: list[StorageDevice]) -> dict:
+        """Explicit metadata-only upgrade after unique physical proof; preserve originals."""
+        from datetime import datetime, timezone
+
+        from usb_array_manager.services.physical_identity import (
+            POLICY_VERSION,
+            PROVEN,
+            reconcile_physical,
+        )
+
+        assignments = self._read_assignments(self.path)
+        reference = self.preparation_reference(slot)
+        other = tuple(self.preparation_reference(number) for number in assignments if number != slot)
+        result = reconcile_physical(slot, reference, devices, other_references=other)
+        if result.result != PROVEN:
+            raise SlotStoreError(f"Identity upgrade refused: {result.result}: {result.reason}")
+        candidate = result.proven_candidates[0]
+        # Re-read before saving; never replace a concurrently edited reservation.
+        if assignments != self._read_assignments(self.path):
+            raise SlotStoreError("Slot records changed during identity review. Review again.")
+        proof = {"policy_version": POLICY_VERSION, "policy": candidate.policy,
+                 "recorded_at": datetime.now(timezone.utc).isoformat(),
+                 "evidence_fields": list(candidate.matched),
+                 "reference": _snapshot_from_device(candidate.device)}
+        assignments[slot]["preparation_identity"] = proof
+        self._save_assignments(assignments)
+        return proof
 
     def ambiguous_slots(self, devices: list[StorageDevice]) -> set[int]:
         """Return reserved slots that have identity evidence but no unique match."""

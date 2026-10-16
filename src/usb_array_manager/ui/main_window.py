@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from PySide6.QtCore import QDateTime, QThread, QTimer, Signal
@@ -9,6 +9,7 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QInputDialog,
     QMainWindow,
     QMessageBox,
@@ -31,6 +32,10 @@ from usb_array_manager.models.vhdx_probe import (
     VhdxProbeResult,
     VhdxTogetherResult,
 )
+from usb_array_manager.services.batch_results import (
+    average_benchmark_results,
+    average_vhdx_comparisons,
+)
 from usb_array_manager.services.benchmark import (
     BenchmarkCancelled,
     BenchmarkError,
@@ -43,11 +48,19 @@ from usb_array_manager.services.benchmark_store import (
     BenchmarkStore,
     BenchmarkStoreError,
 )
-from usb_array_manager.services.batch_results import (
-    average_benchmark_results,
-    average_vhdx_comparisons,
-)
 from usb_array_manager.services.device_monitor import WindowsDeviceEventFilter
+from usb_array_manager.services.host_health import describe_health
+from usb_array_manager.services.host_preparation import (
+    HostPreparationService,
+    PreparationError,
+    PreparationStore,
+    physical_matches,
+)
+from usb_array_manager.services.production_planning import (
+    gib,
+    plan_production,
+    validation_fingerprint,
+)
 from usb_array_manager.services.raid10_plan_store import (
     Raid10PlanStore,
     Raid10PlanStoreError,
@@ -72,6 +85,10 @@ from usb_array_manager.ui.device_tabs import (
     BenchmarksTab,
     LogsTab,
     OverviewTab,
+)
+from usb_array_manager.ui.host_preparation import (
+    HostConfirmationDialog,
+    HostPreparationThread,
 )
 from usb_array_manager.ui.raid10_planner_dialog import Raid10PlannerDialog
 from usb_array_manager.ui.vhdx_together_worker import VhdxTogetherThread
@@ -213,6 +230,11 @@ class MainWindow(QMainWindow):
         self._benchmark_thread: BenchmarkThread | None = None
         self._vhdx_thread: VhdxProbeThread | None = None
         self._together_thread: VhdxTogetherThread | None = None
+        self._host_thread: HostPreparationThread | None = None
+        self._host_review_active = False
+        self._host_validation_at = None
+        self._identity_diagnostic_signatures = {}
+        self._health_diagnostic_signatures = {}
         self._together_cleanup_blocker = ""
         self._benchmark_batch: _BenchmarkBatchState | None = None
         self._vhdx_batch: _VhdxBatchState | None = None
@@ -221,6 +243,9 @@ class MainWindow(QMainWindow):
         self._native_filter_installed = False
         self._connected_devices: list[StorageDevice] = []
         self._slot_store = SlotStore()
+        self._preparation_service = HostPreparationService(
+            self._slot_store, PreparationStore(self._slot_store.path.parent / "host_preparation.json"),
+        )
         self._benchmark_store = BenchmarkStore()
         self._raid10_plan_store = Raid10PlanStore()
         self._saved_raid10_plan: SavedRaid10Plan | None = None
@@ -263,6 +288,10 @@ class MainWindow(QMainWindow):
             lambda: self._start_vhdx_batch(performance=False, runs=1)
         )
         self._backend_tab.together_requested.connect(self._start_vhdx_together)
+        self._backend_tab.host_preparation.prepare_requested.connect(self._start_host_preparation)
+        self._backend_tab.host_preparation.recheck_requested.connect(self._recheck_host)
+        self._backend_tab.host_preparation.identity_requested.connect(self._record_host_identity)
+        self._backend_tab.host_preparation.validation_requested.connect(self._start_host_validation)
         self._backend_tab.performance_requested.connect(
             lambda slot: self._start_vhdx_probe(slot, performance=True)
         )
@@ -335,6 +364,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.refresh_devices)
 
     def refresh_devices(self) -> None:
+        if self._host_thread is not None or self._host_review_active:
+            self._rescan_requested = True
+            return
         if self._scan_thread is not None and self._scan_thread.isRunning():
             self._rescan_requested = True
             return
@@ -348,9 +380,17 @@ class MainWindow(QMainWindow):
         self._scan_thread.scan_succeeded.connect(self._show_devices)
         self._scan_thread.scan_failed.connect(self._show_error)
         self._scan_thread.finished.connect(self._scan_finished)
+        self._backend_tab.host_preparation.set_scanning(True)
         self._scan_thread.start()
 
     def _show_devices(self, devices: list[StorageDevice]) -> None:
+        for previous in self._connected_devices:
+            if not any(physical_matches(previous, current)
+                       and validation_fingerprint(previous) == validation_fingerprint(current)
+                       for current in devices):
+                self._vhdx_backend.record_together(None)
+                self._host_validation_at = None
+                break
         self._connected_devices = devices
         try:
             displayed_devices = self._slot_store.reconcile(devices)
@@ -366,6 +406,7 @@ class MainWindow(QMainWindow):
         self._model.set_devices(displayed_devices)
         self._benchmark_model.set_devices(displayed_devices)
         self._backend_tab.set_devices(displayed_devices)
+        self._refresh_host_preparation()
         self._install_benchmark_buttons()
         updated_at = QDateTime.currentDateTime().toString("HH:mm:ss")
         disconnected_count = sum(
@@ -389,6 +430,14 @@ class MainWindow(QMainWindow):
             )
             self._last_inventory_signature = signature
             self._rebuild_raid_workspace()
+        else:
+            # Free space is intentionally outside the validation fingerprint,
+            # but restored/user data must still refresh production readiness.
+            try:
+                ambiguous = self._slot_store.ambiguous_slots(devices)
+            except SlotStoreError:
+                ambiguous = set(range(1, 5))
+            self._refresh_backend_assessments(ambiguous)
 
     def _show_error(self, message: str) -> None:
         self._status.setStyleSheet("color: #b00020;")
@@ -538,6 +587,9 @@ class MainWindow(QMainWindow):
 
     def _storage_job_active(self) -> bool:
         return (
+            self._host_thread is not None
+            or self._host_review_active
+            or
             self._benchmark_thread is not None
             or self._vhdx_thread is not None
             or self._together_thread is not None
@@ -548,6 +600,7 @@ class MainWindow(QMainWindow):
     def _set_storage_controls_busy(self, busy: bool) -> None:
         self._benchmarks_tab.set_operation_running(busy)
         self._backend_tab.set_probe_running(busy)
+        self._backend_tab.host_preparation.set_busy(busy)
         self._refresh_button.setEnabled(not busy and self._scan_thread is None)
         self._assign_slot_button.setEnabled(False)
         if self._raid10_workspace is not None:
@@ -665,7 +718,216 @@ class MainWindow(QMainWindow):
         self._backend_tab.set_production_plan(self._vhdx_backend.production_plan(
             self._saved_raid10_plan, self._model.devices(), ambiguous_slots=ambiguous_slots,
         ))
+        self._refresh_host_preparation()
         return assessments
+
+    def _refresh_host_preparation(self) -> None:
+        page = self._backend_tab.host_preparation
+        devices = self._connected_devices
+        rows = {}
+        diagnostics = {}
+        health_diagnostics = {}
+        recordable = set()
+        for slot in range(1, 5):
+            status, detail = self._preparation_service.status(slot, devices)
+            displayed = [item for item in self._model.devices() if item.slot == slot]
+            rows[slot] = (displayed[0] if len(displayed) == 1 else None, status, detail)
+            try:
+                proof = self._preparation_service.identity_reconciliation(slot, devices)
+                description = proof.describe() + "\n\n" + self._preparation_service.exclusion_diagnostic(proof)
+                health_description = (describe_health(replace(proof.target, slot=slot), status, detail) if proof.target else
+                                      f"Slot {slot}: health evidence cannot be bound to a PROVEN physical member; preparation BLOCKED.")
+                if proof.result == "PROVEN MATCH" and proof.legacy:
+                    recordable.add(slot)
+            except Exception as error:
+                description = f"Slot {slot} identity reconciliation unavailable: {error}; preparation BLOCKED."
+                health_description = f"Slot {slot}: no proven current health association: {error}. Preparation BLOCKED."
+            diagnostics[slot] = description
+            if self._identity_diagnostic_signatures.get(slot) != description:
+                self._log("Host identity reconciliation", description)
+                self._identity_diagnostic_signatures[slot] = description
+            health_diagnostics[slot] = health_description
+            if self._health_diagnostic_signatures.get(slot) != health_description:
+                self._log("Host health provenance", health_description)
+                self._health_diagnostic_signatures[slot] = health_description
+        count = sum(row[1] == "PREPARED" for row in rows.values())
+        plan = self._vhdx_backend.production_plan(self._saved_raid10_plan, self._model.devices())
+        proven = count == 4 and any(check.name == "Four-member VHDX validation" and check.status == "READY" for check in plan.checks)
+        validation = f"READY — {self._host_validation_at}" if proven and self._host_validation_at else "REVALIDATION REQUIRED"
+        sizing = "Production sizing: pre-format / incomplete preparation"
+        if count == 4:
+            measured = [(slot, "", self._preparation_service.inspect(slot, devices, ntfs=True)) for slot in range(1, 5)]
+            estimate = plan_production(self._saved_raid10_plan, measured, [], False)
+            space = next(check.status for check in estimate.checks if check.name == "Free-space requirement")
+            sizing = f"POST-FORMAT PRODUCTION ESTIMATE: {gib(estimate.logical_bytes)} / member (recalculated); free-space readiness: {space}"
+        page.set_state(rows, f"{count}/4 PREPARED — {count}/4 valid NTFS hosts / identities revalidated\n{sizing}\nFour-member 8 GiB validation: {validation}")
+        page.set_identity_diagnostics(diagnostics, recordable)
+        page.set_health_diagnostics(health_diagnostics)
+        page.set_busy(self._storage_job_active())
+        page.set_scanning(self._scan_thread is not None)
+
+    def _host_action_allowed(self, slot=None, *, allow_review=False) -> bool:
+        reason = None
+        page = self._backend_tab.host_preparation
+        if self._storage_job_active() or (page._active_action and not allow_review):
+            reason = "Another storage operation is already running; duplicate/concurrent action rejected."
+        elif self._scan_thread is not None:
+            reason = "Inventory is refreshing. Wait for the scan to finish; no action was started."
+        elif slot is not None and slot not in range(1, 5):
+            reason = "Select one logical member before starting an action."
+        if reason:
+            self._backend_tab.host_preparation.progress.setText(reason)
+            self._log("Host preparation", reason)
+            return False
+        return True
+
+    def _start_host_validation(self) -> None:
+        if not self._host_action_allowed():
+            return
+        self._refresh_host_preparation()
+        page = self._backend_tab.host_preparation
+        if len(page._rows) != 4 or any(row[1] != "PREPARED" for row in page._rows.values()):
+            page.progress.setText("Validation not started: all four hosts must be PREPARED.")
+            return
+        if not page.begin_action("validation"):
+            return
+        try:
+            self._set_storage_controls_busy(True)
+            self._start_vhdx_together()
+            thread = self._together_thread
+            if thread is not None:
+                page.progress.setText("Running post-format 4-member 8 GiB validation…")
+                page.validate_button.setText("Validating four prepared hosts…")
+                thread.validation_finished.connect(self._host_validation_completed)
+                thread.validation_failed.connect(self._host_validation_failed)
+                thread.finished.connect(self._finish_host_validation_ui)
+                return
+            page.progress.setText("Four-member validation was cancelled or could not start. Review status/logs; no validation started.")
+        except Exception as error:
+            page.progress.setText("Four-member validation could not start: " + str(error))
+            self._log("Host preparation", str(error))
+        self._finish_host_validation_ui()
+
+    def _host_validation_completed(self, result):
+        self._backend_tab.host_preparation.progress.setText(f"Four-member validation finished: {result.status}. Review cleanup results.")
+
+    def _host_validation_failed(self, message):
+        self._backend_tab.host_preparation.progress.setText("Four-member validation failed: " + message)
+
+    def _finish_host_validation_ui(self):
+        self._backend_tab.host_preparation.end_action()
+        self._set_storage_controls_busy(self._storage_job_active())
+        self._refresh_host_preparation()
+
+    def _start_host_preparation(self, slot: int) -> None:
+        if not self._host_action_allowed(slot):
+            return
+        if self._together_cleanup_blocker:
+            QMessageBox.warning(self, "Resolve VHDX cleanup first", self._together_cleanup_blocker)
+            return
+        try:
+            if self._preparation_service.elevated() is not True:
+                raise PreparationError("Run USB Array Manager as administrator before host preparation.")
+            target = self._preparation_service.inspect(slot, self._connected_devices)
+        except Exception as error:
+            self._log("Host preparation", f"Slot {slot}: precheck BLOCKED: {error}")
+            QMessageBox.warning(self, "Host preparation blocked", str(error))
+            return
+        self._host_review_active = True
+        self._backend_tab.host_preparation.begin_action("prepare", slot)
+        self._set_storage_controls_busy(True)
+        dialog = HostConfirmationDialog(target, self)
+        try:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            confirmation = dialog.confirmation() if accepted else None
+        finally:
+            dialog.deleteLater()
+            self._host_review_active = False
+        if confirmation is None:
+            self._log("Host preparation", f"Slot {slot}: confirmation cancelled; member untouched.")
+            self._set_storage_controls_busy(False)
+            self._backend_tab.host_preparation.progress.setText(f"Slot {slot}: confirmation cancelled; member untouched.")
+            self._backend_tab.host_preparation.end_action()
+            if self._rescan_requested:
+                self.refresh_devices()
+            return
+        self._launch_host_worker(slot, confirmation)
+
+    def _recheck_host(self, slot: int) -> None:
+        if not self._host_action_allowed(slot):
+            return
+        self._launch_host_worker(slot)
+
+    def _record_host_identity(self, slot: int) -> None:
+        if not self._host_action_allowed(slot):
+            return
+        self._launch_host_worker(slot, identity_only=True)
+
+    def _launch_host_worker(self, slot, confirmation=None, *, identity_only=False) -> None:
+        if not self._host_action_allowed(slot, allow_review=confirmation is not None):
+            return
+        page = self._backend_tab.host_preparation
+        action_name = "identity" if identity_only else "prepare" if confirmation else "recheck"
+        if page._active_action != "prepare" or not confirmation:
+            if not page.begin_action(action_name, slot):
+                return
+        self._vhdx_backend.record_together(None)
+        self._host_validation_at = None
+        action = "explicit physical identity proof recording" if identity_only else "confirmed preparation" if confirmation else "read-only recheck"
+        self._log("Host preparation", f"Slot {slot}: {action}; previous four-member validation invalidated.")
+        self._host_thread = HostPreparationThread(self._preparation_service, slot, confirmation, self, identity_only=identity_only)
+        self._host_thread.progress.connect(self._host_progress)
+        self._host_thread.completed.connect(self._host_completed)
+        self._host_thread.failed.connect(self._host_failed)
+        self._host_thread.finished.connect(self._host_finished)
+        self._set_storage_controls_busy(True)
+        try:
+            self._host_thread.start()
+        except Exception as error:
+            self._host_thread.deleteLater()
+            self._host_thread = None
+            page.progress.setText(f"Slot {slot}: action could not start: {error}")
+            page.end_action()
+            self._set_storage_controls_busy(False)
+            self._log("Host preparation", str(error))
+
+    def _host_progress(self, message):
+        self._backend_tab.host_preparation.progress.setText(message)
+        page = self._backend_tab.host_preparation
+        if self._host_thread is not None:
+            slot = self._host_thread.slot
+            for stage in ("FORMATTING", "REDISCOVERING", "REVALIDATING", "PREPARED", "FAILED", "NEEDS REVIEW"):
+                if stage in message:
+                    page.table.item(slot - 1, 6).setText(stage)
+                    break
+        self._log("Host preparation", message)
+
+    def _host_completed(self, target):
+        current = [item for item in self._connected_devices if not physical_matches(target, item)]
+        current.append(target)
+        self._show_devices(current)
+        self._refresh_backend_assessments(set())
+        action = ("Identity recording" if self._host_thread.identity_only else "Host preparation" if self._host_thread.confirmation else "Read-only recheck") if self._host_thread else "Host action"
+        self._host_progress(f"Slot {target.slot}: {action} completed successfully. Review current status; no other member was started.")
+        self._log("Host preparation", "Readiness and production sizing recalculated from current host measurements; fresh four-member validation required.")
+
+    def _host_failed(self, message):
+        self._host_progress("FAILED / NEEDS REVIEW: " + message)
+        self._refresh_host_preparation()
+        QMessageBox.warning(self, "Host preparation stopped — review required", message + "\nNo other member will be started. Inventory will refresh; no automatic reformat.")
+
+    def _host_finished(self):
+        thread = self._host_thread
+        self._host_thread = None
+        if thread is not None:
+            thread.deleteLater()
+        self._backend_tab.host_preparation.end_action()
+        self._set_storage_controls_busy(False)
+        self._refresh_host_preparation()
+        if self._closing:
+            QTimer.singleShot(0, self.close)
+        else:
+            self.refresh_devices()
 
     def _backend_selection_changed(self, name: str) -> None:
         if name in self._raid_backends:
@@ -968,6 +1230,13 @@ class MainWindow(QMainWindow):
         devices = self._together_thread.devices if self._together_thread is not None else ()
         plan = getattr(self._together_thread, "saved_plan", None)
         self._vhdx_backend.record_together(result, devices, plan)
+        try:
+            self._preparation_service.record_validation(list(devices), result)
+            validation = self._preparation_service.store.load().get("validation")
+            self._host_validation_at = validation["at"] if validation else None
+        except Exception as error:
+            self._host_validation_at = None
+            self._log("Host preparation validation", str(error))
         try:
             ambiguous = self._slot_store.ambiguous_slots(self._connected_devices)
         except SlotStoreError:
@@ -1550,6 +1819,7 @@ class MainWindow(QMainWindow):
     def _scan_finished(self) -> None:
         thread = self._scan_thread
         self._scan_thread = None
+        self._backend_tab.host_preparation.set_scanning(False)
         self._refresh_button.setEnabled(not self._storage_job_active())
         if thread is not None:
             thread.deleteLater()
@@ -1584,7 +1854,7 @@ class MainWindow(QMainWindow):
                 self._vhdx_thread.cancel()
             if self._together_thread is not None:
                 self._together_thread.cancel()
-            self._status.setText("Finishing safely and deleting temporary files…")
+            self._status.setText("Waiting for host preparation to finish safely…" if self._host_thread else "Finishing safely and deleting temporary files…")
             self._benchmarks_tab.status.setText(
                 "Finishing safely and deleting temporary files…"
             )
@@ -1608,6 +1878,7 @@ def _inventory_signature(devices: list[StorageDevice]) -> tuple:
             device.container_id,
             device.health_status,
             device.is_connected,
+            validation_fingerprint(device),
         )
         for device in devices
     )

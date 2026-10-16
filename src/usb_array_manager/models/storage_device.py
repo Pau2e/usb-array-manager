@@ -14,6 +14,8 @@ class HostVolume:
     free_bytes: int | None
     is_system: bool | None = None
     is_boot: bool | None = None
+    health_status: str | None = None
+    health_details_json: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,3 +50,4 @@ class StorageDevice:
     filesystem_types: tuple[str, ...] = ()
     operational_status: str | None = None
     host_volumes: tuple[HostVolume, ...] = ()
+    health_details_json: str | None = None
